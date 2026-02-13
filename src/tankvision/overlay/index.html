@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tank Vision Overlay</title>
+    <link rel="stylesheet" href="overlay.css">
+</head>
+<body>
+    <div id="overlay" class="overlay standard">
+        <div class="header">
+            <span id="tank-name" class="tank-name">Waiting for Battle...</span>
+            <span id="moe-percent" class="moe-percent">--.--%</span>
+        </div>
+
+        <div class="progress-container">
+            <div id="progress-bar" class="progress-bar">
+                <div id="progress-fill" class="progress-fill"></div>
+                <div id="progress-target" class="progress-target"></div>
+            </div>
+        </div>
+
+        <div class="stats-row">
+            <span id="delta" class="delta neutral">+0.00%</span>
+            <span id="damage" class="damage">0</span>
+        </div>
+    </div>
+
+    <script src="overlay.js"></script>
+</body>
+</html>
