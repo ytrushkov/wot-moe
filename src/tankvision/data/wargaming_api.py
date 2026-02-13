@@ -16,7 +16,7 @@ BASE_URLS = {
 # Default application_id shipped with TankVision.
 # Users can override this in config.toml [api] section.
 # This is a public app identifier, not a secret.
-DEFAULT_APP_ID = "demo"
+DEFAULT_APP_ID = "4d5d0fe3b7b665ff721b824118775030"
 
 
 class WargamingApiError(Exception):
