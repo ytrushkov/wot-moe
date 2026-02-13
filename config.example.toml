@@ -1,7 +1,7 @@
 [api]
-# Wargaming API key from https://developers.wargaming.net/
-# Required for auto-fetching tank data and MoE thresholds
-application_id = ""
+# Wargaming API key — a default ships with TankVision.
+# Override here only if you want to use your own key (e.g. for higher rate limits).
+# application_id = ""
 
 [player]
 gamertag = ""

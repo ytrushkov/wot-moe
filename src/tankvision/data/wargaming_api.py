@@ -13,9 +13,10 @@ BASE_URLS = {
     "ps": "https://api-ps4-console.worldoftanks.com/wotx",
 }
 
-# Demo application_id for development/testing.
-# Users should register their own at https://developers.wargaming.net/
-DEMO_APP_ID = "demo"
+# Default application_id shipped with TankVision.
+# Users can override this in config.toml [api] section.
+# This is a public app identifier, not a secret.
+DEFAULT_APP_ID = "demo"
 
 
 class WargamingApiError(Exception):
@@ -33,7 +34,7 @@ class WargamingApi:
 
     def __init__(
         self,
-        application_id: str = DEMO_APP_ID,
+        application_id: str = DEFAULT_APP_ID,
         platform: str = "xbox",
         session: aiohttp.ClientSession | None = None,
     ) -> None:
