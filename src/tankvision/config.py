@@ -14,6 +14,7 @@ DEFAULTS: dict[str, Any] = {
     "player": {
         "gamertag": "",
         "platform": "xbox",
+        "application_id": "",
     },
     "ocr": {
         "roi_x": 0,

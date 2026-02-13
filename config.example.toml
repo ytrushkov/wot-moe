@@ -1,6 +1,9 @@
 [player]
 gamertag = ""
 platform = "xbox"  # "xbox" or "ps"
+# Wargaming API key from https://developers.wargaming.net/
+# Required for auto-fetching tank data and MoE thresholds
+application_id = ""
 
 [ocr]
 # Region of interest for damage numbers (screen coordinates)
