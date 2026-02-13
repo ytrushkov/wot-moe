@@ -1,6 +1,7 @@
 """Wargaming API client for World of Tanks Console (WOTX)."""
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
@@ -162,3 +163,85 @@ class WargamingApi:
         if results:
             return results[0].get("account_id")
         return None
+
+    async def get_tank_snapshot(self, account_id: int, tank_id: int) -> "TankSnapshot | None":
+        """Get a snapshot of a tank's cumulative stats for post-battle comparison.
+
+        Returns:
+            TankSnapshot with current cumulative stats, or None if not found.
+        """
+        tanks = await self.get_player_tanks(account_id, tank_id)
+        if not tanks:
+            return None
+        t = tanks[0]
+        all_stats = t.get("all", {})
+        return TankSnapshot(
+            tank_id=t.get("tank_id", tank_id),
+            battles=all_stats.get("battles", 0),
+            marks_on_gun=t.get("marks_on_gun", 0),
+            damage_dealt=all_stats.get("damage_dealt", 0),
+            damage_assisted=all_stats.get("damage_assisted", 0),
+        )
+
+    async def detect_active_tank(self, account_id: int) -> dict | None:
+        """Find the most recently played tank for a player.
+
+        Returns:
+            The tank stats dict for the most recently played tank, or None.
+        """
+        tanks = await self.get_player_tanks(account_id)
+        if not tanks:
+            return None
+        # Sort by last_battle_time descending; fall back to 0 if missing
+        tanks.sort(key=lambda t: t.get("last_battle_time", 0), reverse=True)
+        return tanks[0]
+
+
+@dataclass
+class TankSnapshot:
+    """Cumulative stats snapshot for a specific tank, used for post-battle correction."""
+
+    tank_id: int
+    battles: int
+    marks_on_gun: int
+    damage_dealt: int
+    damage_assisted: int
+
+    def battle_delta(self, after: "TankSnapshot") -> "BattleDelta | None":
+        """Compute per-battle damage delta between this snapshot and a later one.
+
+        Returns:
+            BattleDelta if exactly one new battle was played, None otherwise.
+        """
+        battles_diff = after.battles - self.battles
+        if battles_diff != 1:
+            return None
+        return BattleDelta(
+            damage_dealt=after.damage_dealt - self.damage_dealt,
+            damage_assisted=after.damage_assisted - self.damage_assisted,
+            marks_on_gun_before=self.marks_on_gun,
+            marks_on_gun_after=after.marks_on_gun,
+        )
+
+
+@dataclass
+class BattleDelta:
+    """Per-battle damage values computed from API cumulative stat deltas.
+
+    The damage_assisted here reflects WG's server-side calculation, which uses
+    max(tracking, spotting) rather than the sum shown on the in-game HUD.
+    This makes it more accurate than our OCR-derived estimate.
+    """
+
+    damage_dealt: int
+    damage_assisted: int
+    marks_on_gun_before: int
+    marks_on_gun_after: int
+
+    @property
+    def combined(self) -> int:
+        return self.damage_dealt + self.damage_assisted
+
+    @property
+    def marks_changed(self) -> bool:
+        return self.marks_on_gun_after != self.marks_on_gun_before
