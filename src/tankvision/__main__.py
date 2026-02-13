@@ -1,4 +1,4 @@
-"""Entry point for Tank Vision application."""
+"""Entry point for WoT Console Overlay application."""
 
 import asyncio
 import logging
@@ -58,7 +58,7 @@ async def run(config_path: str = "config.toml") -> None:
 
     await server.start()
     logger.info(
-        "Tank Vision running. Add Browser Source in OBS: http://localhost:%d",
+        "WoT Console Overlay running. Add Browser Source in OBS: http://localhost:%d",
         config["server"]["http_port"],
     )
 

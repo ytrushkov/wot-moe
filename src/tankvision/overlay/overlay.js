@@ -1,7 +1,7 @@
 /**
- * Tank Vision Overlay - WebSocket client.
+ * WoT Console Overlay - WebSocket client.
  *
- * Connects to the Tank Vision app's WebSocket server and updates the DOM
+ * Connects to the WoT Console Overlay app's WebSocket server and updates the DOM
  * with live MoE data.
  */
 
@@ -25,7 +25,7 @@ function connect() {
     ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
-        console.log("Connected to Tank Vision");
+        console.log("Connected to WoT Console Overlay");
     };
 
     ws.onmessage = (event) => {
