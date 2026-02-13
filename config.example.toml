@@ -1,0 +1,38 @@
+[player]
+gamertag = ""
+platform = "xbox"  # "xbox" or "ps"
+
+[ocr]
+# Region of interest for damage numbers (screen coordinates)
+# Set via calibration UI or manually
+roi_x = 0
+roi_y = 0
+roi_width = 300
+roi_height = 100
+# Sampling rate in Hz (frames per second to capture)
+sample_rate = 2
+# Template matching confidence threshold (0.0 - 1.0)
+confidence_threshold = 0.8
+
+[moe]
+# Current MoE percentage (read from in-game service record)
+current_moe_percent = 0.0
+# Target damage for current tank (auto-fetched or manual override)
+target_damage = 0
+# EMA smoothing factor (default: 2 / (100 + 1))
+ema_alpha = 0.0198
+
+[overlay]
+# Opacity: 0.0 (invisible) to 1.0 (solid)
+opacity = 0.85
+# Scale factor for the overlay
+scale = 1.0
+# Layout: "standard" or "compact"
+layout = "standard"
+# Color blind mode: swaps red/green for blue/orange
+color_blind_mode = false
+
+[server]
+# Ports for the overlay web server and WebSocket
+http_port = 5173
+ws_port = 5174
