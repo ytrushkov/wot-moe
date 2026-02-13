@@ -11,10 +11,12 @@ else:
     import tomli as tomllib
 
 DEFAULTS: dict[str, Any] = {
+    "api": {
+        "application_id": "",
+    },
     "player": {
         "gamertag": "",
         "platform": "xbox",
-        "application_id": "",
     },
     "ocr": {
         "roi_x": 0,
