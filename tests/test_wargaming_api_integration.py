@@ -11,7 +11,7 @@ from tankvision.data.wargaming_api import DEFAULT_APP_ID, TankSnapshot, Wargamin
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-GAMERTAG = "YURTRush"
+GAMERTAG = "YURTRush-x"
 PLATFORM = "xbox"
 
 
@@ -42,7 +42,8 @@ async def test_search_player_exact_match(api: WargamingApi):
 
 
 async def test_search_player_non_exact(api: WargamingApi):
-    results = await api.search_player(GAMERTAG, exact=False)
+    # Prefix search using the stem (without "-x") to exercise non-exact mode
+    results = await api.search_player("YURTRush", exact=False)
     assert len(results) >= 1
     nicknames = [r["nickname"].lower() for r in results]
     assert GAMERTAG.lower() in nicknames
