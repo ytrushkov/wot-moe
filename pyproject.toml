@@ -48,3 +48,6 @@ select = ["E", "F", "W", "I", "N", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: tests that hit the live Wargaming API (require network)",
+]
