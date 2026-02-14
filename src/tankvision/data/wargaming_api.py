@@ -1,4 +1,4 @@
-"""Wargaming API client for World of Tanks Console (WOTX)."""
+"""Wargaming API client for World of Tanks Console (WoTC)."""
 
 import logging
 from dataclasses import dataclass
@@ -8,11 +8,11 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# Base URLs per platform
-BASE_URLS = {
-    "xbox": "https://api-xbox-console.worldoftanks.com/wotx",
-    "ps": "https://api-ps4-console.worldoftanks.com/wotx",
-}
+# Unified WoT Console API base URL (post-crossplay).
+# The old per-platform endpoints (api-xbox-console / api-ps4-console) with the
+# /wotx path prefix were deprecated when Wargaming introduced cross-platform
+# play.  The unified endpoint uses /wotc for all console platforms.
+BASE_URL = "https://api-console.worldoftanks.com/wotc"
 
 # Default application_id shipped with TankVision.
 # Users can override this in config.toml [api] section.
@@ -39,11 +39,11 @@ class WargamingApi:
         platform: str = "xbox",
         session: aiohttp.ClientSession | None = None,
     ) -> None:
-        if platform not in BASE_URLS:
+        if platform not in ("xbox", "ps"):
             raise ValueError(f"Unknown platform: {platform!r}. Must be 'xbox' or 'ps'.")
         self.application_id = application_id
         self.platform = platform
-        self.base_url = BASE_URLS[platform]
+        self.base_url = BASE_URL
         self._session = session
         self._owns_session = session is None
 

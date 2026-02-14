@@ -11,12 +11,12 @@ class TestWargamingApiInit:
     def test_default_platform_is_xbox(self):
         api = WargamingApi(application_id="test123")
         assert api.platform == "xbox"
-        assert "xbox" in api.base_url
+        assert "api-console.worldoftanks.com" in api.base_url
 
     def test_ps_platform(self):
         api = WargamingApi(application_id="test123", platform="ps")
         assert api.platform == "ps"
-        assert "ps4" in api.base_url
+        assert "api-console.worldoftanks.com" in api.base_url
 
     def test_invalid_platform_raises(self):
         with pytest.raises(ValueError, match="Unknown platform"):
