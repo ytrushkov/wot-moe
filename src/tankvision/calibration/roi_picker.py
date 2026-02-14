@@ -1,0 +1,212 @@
+"""Visual ROI picker: transparent overlay where the user drags a rectangle."""
+
+import sys
+from pathlib import Path
+
+from PyQt6.QtCore import QPoint, QRect, Qt
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtWidgets import QApplication, QMainWindow
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+
+class RoiPickerWindow(QMainWindow):
+    """Fullscreen transparent overlay for selecting a screen region.
+
+    The user clicks and drags to draw a rectangle, then presses Enter to confirm
+    or Escape to cancel.
+    """
+
+    def __init__(self, config_path: str = "config.toml") -> None:
+        super().__init__()
+        self.config_path = Path(config_path)
+        self._start: QPoint | None = None
+        self._end: QPoint | None = None
+        self._confirmed = False
+
+        self.setWindowTitle("TankVision — Select Tank Name Region")
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.showFullScreen()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+
+        # Semi-transparent dark overlay
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+
+        # Instructions
+        painter.setPen(QPen(QColor(255, 255, 255)))
+        font = QFont("Arial", 18)
+        painter.setFont(font)
+        painter.drawText(
+            self.rect(),
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
+            "\n\nDrag a rectangle over the tank name in the garage.\n"
+            "Press ENTER to confirm, ESC to cancel.",
+        )
+
+        # Draw the selection rectangle
+        if self._start and self._end:
+            rect = QRect(self._start, self._end).normalized()
+            # Clear the selected area (show through)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.fillRect(rect, Qt.GlobalColor.transparent)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+            # Draw border
+            pen = QPen(QColor(0, 255, 0), 2)
+            painter.setPen(pen)
+            painter.drawRect(rect)
+
+            # Show dimensions
+            dim_font = QFont("Arial", 12)
+            painter.setFont(dim_font)
+            painter.setPen(QPen(QColor(0, 255, 0)))
+            painter.drawText(
+                rect.x(),
+                rect.y() - 5,
+                f"{rect.width()}x{rect.height()} at ({rect.x()}, {rect.y()})",
+            )
+
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start = event.pos()
+            self._end = event.pos()
+            self.update()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._start is not None:
+            self._end = event.pos()
+            self.update()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._start:
+            self._end = event.pos()
+            self.update()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+            if self._start and self._end:
+                self._confirmed = True
+                self.close()
+        elif event.key() == Qt.Key.Key_Escape:
+            self._confirmed = False
+            self.close()
+
+    @property
+    def selected_roi(self) -> tuple[int, int, int, int] | None:
+        """Return (x, y, width, height) or None if cancelled."""
+        if not self._confirmed or not self._start or not self._end:
+            return None
+        rect = QRect(self._start, self._end).normalized()
+        if rect.width() < 10 or rect.height() < 10:
+            return None
+        return (rect.x(), rect.y(), rect.width(), rect.height())
+
+
+def _save_roi_to_config(roi: tuple[int, int, int, int], config_path: Path) -> None:
+    """Write the garage ROI into the config file, preserving other settings."""
+    x, y, w, h = roi
+
+    # Read existing config or start fresh
+    if config_path.exists():
+        text = config_path.read_text()
+    else:
+        text = ""
+
+    # Check if [garage] section exists
+    if "[garage]" in text:
+        # Replace existing roi values using line-by-line rewrite
+        lines = text.splitlines(keepends=True)
+        new_lines = []
+        in_garage = False
+        garage_keys_written = set()
+        for line in lines:
+            stripped = line.strip()
+            if stripped == "[garage]":
+                in_garage = True
+                new_lines.append(line)
+                continue
+            elif stripped.startswith("[") and stripped.endswith("]"):
+                # Entering a new section — write any missing garage keys first
+                if in_garage:
+                    for key, val in [
+                        ("roi_x", x), ("roi_y", y),
+                        ("roi_width", w), ("roi_height", h),
+                    ]:
+                        if key not in garage_keys_written:
+                            new_lines.append(f"{key} = {val}\n")
+                in_garage = False
+                new_lines.append(line)
+                continue
+
+            if in_garage:
+                for key, val in [
+                    ("roi_x", x), ("roi_y", y),
+                    ("roi_width", w), ("roi_height", h),
+                ]:
+                    if stripped.startswith(f"{key}"):
+                        new_lines.append(f"{key} = {val}\n")
+                        garage_keys_written.add(key)
+                        break
+                else:
+                    new_lines.append(line)
+            else:
+                new_lines.append(line)
+
+        # If [garage] was the last section, write missing keys
+        if in_garage:
+            for key, val in [
+                ("roi_x", x), ("roi_y", y),
+                ("roi_width", w), ("roi_height", h),
+            ]:
+                if key not in garage_keys_written:
+                    new_lines.append(f"{key} = {val}\n")
+
+        text = "".join(new_lines)
+    else:
+        # Append [garage] section
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += (
+            f"\n[garage]\n"
+            f"roi_x = {x}\n"
+            f"roi_y = {y}\n"
+            f"roi_width = {w}\n"
+            f"roi_height = {h}\n"
+            f"poll_interval = 3.0\n"
+        )
+
+    config_path.write_text(text)
+
+
+def run_roi_picker(config_path: str = "config.toml") -> tuple[int, int, int, int] | None:
+    """Launch the ROI picker and save result to config.
+
+    Returns:
+        The selected (x, y, width, height) or None if cancelled.
+    """
+    app = QApplication(sys.argv)
+    picker = RoiPickerWindow(config_path)
+    app.exec()
+
+    roi = picker.selected_roi
+    if roi is None:
+        print("Calibration cancelled.")
+        return None
+
+    x, y, w, h = roi
+    print(f"Selected region: {w}x{h} at ({x}, {y})")
+
+    _save_roi_to_config(roi, Path(config_path))
+    print(f"Saved to {config_path}")
+    return roi

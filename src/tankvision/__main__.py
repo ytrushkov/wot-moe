@@ -11,6 +11,7 @@ from tankvision.config import load_config
 from tankvision.data.session_store import SessionStore
 from tankvision.data.threshold_provider import ThresholdProvider
 from tankvision.data.wargaming_api import DEFAULT_APP_ID, TankSnapshot, WargamingApi
+from tankvision.ocr.garage_detector import GarageDetector, build_vehicle_lookup
 from tankvision.ocr.ocr_pipeline import OcrPipeline
 from tankvision.server.websocket_server import MoeWebSocketServer
 
@@ -209,6 +210,84 @@ async def _poll_api_correction(
     return before
 
 
+def _garage_enabled(config: dict) -> bool:
+    """Return True if the garage ROI is configured (non-zero dimensions)."""
+    g = config["garage"]
+    return g["roi_width"] > 0 and g["roi_height"] > 0
+
+
+async def _handle_tank_switch(
+    new_tank_id: int,
+    new_tank_name: str,
+    *,
+    api: WargamingApi,
+    calculator: MoeCalculator,
+    store: SessionStore,
+    threshold_provider: ThresholdProvider,
+    server: MoeWebSocketServer,
+    config: dict,
+    account_id: int | None,
+    old_session_id: int | None,
+) -> tuple[int, str, int | None, TankSnapshot | None]:
+    """Update all tracking state when the user switches tanks in the garage.
+
+    Returns:
+        (tank_id, tank_name, new_session_id, api_snapshot)
+    """
+    # Finalize old session
+    if old_session_id is not None:
+        store.update_session(
+            old_session_id,
+            end_moe=calculator.current_moe,
+            end_ema=calculator.ema,
+            battles=calculator.battles_this_session,
+        )
+
+    # Fetch marks and target damage for the new tank
+    marks_on_gun = 0
+    api_snapshot: TankSnapshot | None = None
+    if account_id:
+        try:
+            tanks = await api.get_player_tanks(account_id, tank_id=new_tank_id)
+            if tanks:
+                marks_on_gun = tanks[0].get("marks_on_gun", 0)
+        except Exception:
+            logger.warning("Failed to fetch marks for tank %d", new_tank_id)
+
+        try:
+            api_snapshot = await api.get_tank_snapshot(account_id, new_tank_id)
+        except Exception:
+            logger.warning("Failed to take API snapshot for tank %d", new_tank_id)
+
+    target_damage = await _resolve_target_damage(
+        config, new_tank_id, new_tank_name, marks_on_gun, threshold_provider,
+    )
+
+    # Restore persisted EMA or start fresh
+    current_moe = 0.0
+    ema_snap = store.load_ema(new_tank_id)
+    if ema_snap:
+        current_moe = ema_snap.moe_percent
+        logger.info("Restored MoE for %s: %.2f%%", new_tank_name, current_moe)
+
+    calculator.set_tank(new_tank_name, target_damage, current_moe)
+
+    # Start new session
+    new_session_id = store.start_session(
+        new_tank_id, new_tank_name, current_moe, calculator.ema,
+    )
+
+    # Broadcast the switch immediately
+    state = calculator._build_state("idle")
+    await server.broadcast(state)
+
+    logger.info(
+        "Switched to %s (id=%d, marks=%d, target=%d)",
+        new_tank_name, new_tank_id, marks_on_gun, target_damage,
+    )
+    return new_tank_id, new_tank_name, new_session_id, api_snapshot
+
+
 async def run(config_path: str = "config.toml") -> None:
     config = load_config(config_path)
 
@@ -271,6 +350,25 @@ async def run(config_path: str = "config.toml") -> None:
         http_port=config["server"]["http_port"],
     )
 
+    # --- Garage detector (optional) ---
+    garage_detector: GarageDetector | None = None
+    if _garage_enabled(config):
+        try:
+            vehicles = await api.get_vehicles()
+            vehicle_lookup = build_vehicle_lookup(vehicles)
+            g = config["garage"]
+            garage_detector = GarageDetector(
+                roi=(g["roi_x"], g["roi_y"], g["roi_width"], g["roi_height"]),
+                vehicle_lookup=vehicle_lookup,
+            )
+            logger.info(
+                "Garage detection enabled (ROI: %dx%d at %d,%d, %d vehicles loaded)",
+                g["roi_width"], g["roi_height"], g["roi_x"], g["roi_y"],
+                len(vehicle_lookup),
+            )
+        except Exception:
+            logger.exception("Failed to initialize garage detector — falling back to API")
+
     # --- Session tracking ---
     session_id: int | None = None
     if tank_id:
@@ -300,6 +398,38 @@ async def run(config_path: str = "config.toml") -> None:
         mode,
         config["server"]["http_port"],
     )
+
+    # --- Background garage polling ---
+    async def _garage_poll_loop() -> None:
+        nonlocal tank_id, tank_name, session_id, api_snapshot
+        assert garage_detector is not None
+        interval = config["garage"]["poll_interval"]
+        while not stop_event.is_set():
+            await asyncio.sleep(interval)
+            try:
+                switch = garage_detector.detect_switch()
+            except Exception:
+                logger.exception("Garage poll error")
+                continue
+            if switch is None:
+                continue
+            new_tank_id, new_tank_name = switch
+            tank_id, tank_name, session_id, api_snapshot = await _handle_tank_switch(
+                new_tank_id,
+                new_tank_name,
+                api=api,
+                calculator=calculator,
+                store=store,
+                threshold_provider=threshold_provider,
+                server=server,
+                config=config,
+                account_id=account_id,
+                old_session_id=session_id,
+            )
+
+    garage_task: asyncio.Task | None = None
+    if garage_detector is not None:
+        garage_task = asyncio.create_task(_garage_poll_loop())
 
     # --- Main loop ---
     correction_task: asyncio.Task | None = None
@@ -355,13 +485,14 @@ async def run(config_path: str = "config.toml") -> None:
 
             await asyncio.sleep(1.0 / config["ocr"]["sample_rate"])
     finally:
-        # Cancel any pending correction
-        if correction_task and not correction_task.done():
-            correction_task.cancel()
-            try:
-                await correction_task
-            except asyncio.CancelledError:
-                pass
+        # Cancel background tasks
+        for task in (garage_task, correction_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         # Finalize session
         if session_id is not None:
@@ -377,6 +508,8 @@ async def run(config_path: str = "config.toml") -> None:
         await api.close()
         store.close()
         capture.close()
+        if garage_detector:
+            garage_detector.close()
         logger.info("Shutdown complete")
 
 
@@ -386,7 +519,19 @@ def main() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.toml"
+    # Parse --calibrate flag
+    args = sys.argv[1:]
+    calibrate = "--calibrate" in args
+    if calibrate:
+        args.remove("--calibrate")
+    config_path = args[0] if args else "config.toml"
+
+    if calibrate:
+        from tankvision.calibration.roi_picker import run_roi_picker
+
+        run_roi_picker(config_path)
+        return
+
     asyncio.run(run(config_path))
 
 
