@@ -9,10 +9,9 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # Unified WoT Console API base URL (post-crossplay).
-# The old per-platform endpoints (api-xbox-console / api-ps4-console) with the
-# /wotx path prefix were deprecated when Wargaming introduced cross-platform
-# play.  The unified endpoint uses /wotc for all console platforms.
-BASE_URL = "https://api-console.worldoftanks.com/wotc"
+# The old per-platform endpoints (api-xbox-console / api-ps4-console) were
+# consolidated into a single crossplay endpoint.  The path prefix is /wotx.
+BASE_URL = "https://api-console.worldoftanks.com/wotx"
 
 # Default application_id shipped with TankVision.
 # Users can override this in config.toml [api] section.
