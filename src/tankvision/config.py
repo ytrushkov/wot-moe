@@ -23,7 +23,7 @@ DEFAULTS: dict[str, Any] = {
         "roi_y": 0,
         "roi_width": 0,
         "roi_height": 0,
-        "poll_interval": 3.0,
+        "poll_interval": 0.5,
     },
     "ocr": {
         "roi_x": 0,

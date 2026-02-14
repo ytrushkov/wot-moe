@@ -1,6 +1,7 @@
 """Wargaming API client for World of Tanks Console (WoTC)."""
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +24,11 @@ class WargamingApiError(Exception):
     """Raised when the Wargaming API returns an error."""
 
 
+# Default cache TTL in seconds.  Keeps rapid garage-scroll tank switches
+# from hammering the WG API (one request per 0.5 s poll interval).
+_DEFAULT_CACHE_TTL = 30.0
+
+
 class WargamingApi:
     """Async client for the Wargaming WoT Console API.
 
@@ -30,6 +36,7 @@ class WargamingApi:
         application_id: API key from developers.wargaming.net. Use "demo" for testing.
         platform: "xbox" or "ps".
         session: Optional aiohttp session to reuse. If None, creates one internally.
+        cache_ttl: How long (seconds) to cache GET responses.  Set to 0 to disable.
     """
 
     def __init__(
@@ -37,6 +44,7 @@ class WargamingApi:
         application_id: str = DEFAULT_APP_ID,
         platform: str = "xbox",
         session: aiohttp.ClientSession | None = None,
+        cache_ttl: float = _DEFAULT_CACHE_TTL,
     ) -> None:
         if platform not in ("xbox", "ps"):
             raise ValueError(f"Unknown platform: {platform!r}. Must be 'xbox' or 'ps'.")
@@ -45,6 +53,9 @@ class WargamingApi:
         self.base_url = BASE_URL
         self._session = session
         self._owns_session = session is None
+        self._cache_ttl = cache_ttl
+        # {cache_key: (timestamp, data)}
+        self._cache: dict[str, tuple[float, dict]] = {}
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -56,8 +67,26 @@ class WargamingApi:
         if self._owns_session and self._session and not self._session.closed:
             await self._session.close()
 
+    def _cache_key(self, endpoint: str, params: dict[str, str]) -> str:
+        """Build a deterministic cache key from endpoint + sorted params."""
+        sorted_params = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        return f"{endpoint}?{sorted_params}"
+
+    def invalidate_cache(self, endpoint: str | None = None) -> None:
+        """Drop cached responses.  If *endpoint* is given, only drop entries for it."""
+        if endpoint is None:
+            self._cache.clear()
+        else:
+            self._cache = {
+                k: v for k, v in self._cache.items() if not k.startswith(endpoint)
+            }
+
     async def _request(self, endpoint: str, **params: Any) -> dict:
         """Make a GET request to the Wargaming API.
+
+        Responses are cached for ``cache_ttl`` seconds so that rapid
+        back-to-back calls (e.g. during garage tank scrolling) do not
+        generate redundant network traffic.
 
         Args:
             endpoint: API path (e.g., "/account/list/").
@@ -69,8 +98,16 @@ class WargamingApi:
         Raises:
             WargamingApiError: If the API returns an error status.
         """
-        session = await self._ensure_session()
         params["application_id"] = self.application_id
+        cache_key = self._cache_key(endpoint, params)
+
+        # Check cache
+        if self._cache_ttl > 0 and cache_key in self._cache:
+            ts, cached_data = self._cache[cache_key]
+            if time.monotonic() - ts < self._cache_ttl:
+                return cached_data
+
+        session = await self._ensure_session()
         url = f"{self.base_url}{endpoint}"
 
         async with session.get(url, params=params) as resp:
@@ -82,7 +119,13 @@ class WargamingApi:
             code = error.get("code", 0)
             raise WargamingApiError(f"API error {code}: {msg}")
 
-        return body.get("data", {})
+        data = body.get("data", {})
+
+        # Store in cache
+        if self._cache_ttl > 0:
+            self._cache[cache_key] = (time.monotonic(), data)
+
+        return data
 
     # --- Player endpoints ---
 

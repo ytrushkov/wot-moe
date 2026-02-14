@@ -146,6 +146,8 @@ async def _poll_api_correction(
         delay = _API_POLL_BASE_DELAY * (2**attempt)
         await asyncio.sleep(delay)
 
+        # Must bypass cache — we're waiting for fresh post-battle data
+        api.invalidate_cache("/tanks/stats/")
         try:
             after = await api.get_tank_snapshot(account_id, tank_id)
         except Exception:

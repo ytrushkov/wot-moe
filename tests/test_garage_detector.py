@@ -189,7 +189,7 @@ class TestGarageConfig:
 
         assert "garage" in DEFAULTS
         assert DEFAULTS["garage"]["roi_width"] == 0
-        assert DEFAULTS["garage"]["poll_interval"] == 3.0
+        assert DEFAULTS["garage"]["poll_interval"] == 0.5
 
     def test_garage_enabled_check(self):
         from tankvision.__main__ import _garage_enabled

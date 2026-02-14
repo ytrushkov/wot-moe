@@ -16,8 +16,9 @@ roi_x = 0
 roi_y = 0
 roi_width = 0     # 0 = disabled (falls back to API-based detection)
 roi_height = 0
-# How often to poll the garage screen (seconds)
-poll_interval = 3.0
+# How often to poll the garage screen (seconds).
+# 0.5s keeps up with scrolling through the tank carousel.
+poll_interval = 0.5
 
 [ocr]
 # Region of interest for damage numbers (screen coordinates)
