@@ -1,13 +1,14 @@
 """Visual ROI picker: transparent overlay where the user drags a rectangle.
 
 Two-step flow:
-1. Dialog to select which screen/monitor to use.
+1. Dialog to select which screen/window to capture (with thumbnails).
 2. Fullscreen overlay on that screen to drag-select the ROI.
 """
 
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 
@@ -30,6 +31,10 @@ _MODES = {
         "section": "ocr",
     },
 }
+
+# Thumbnail size for the screen picker dialog
+_THUMB_WIDTH = 240
+_THUMB_HEIGHT = 135
 
 
 def _save_roi_to_config(
@@ -113,6 +118,26 @@ def _save_roi_to_config(
     config_path.write_text(text)
 
 
+def _grab_mss_monitor(sct, monitor: dict) -> tuple:
+    """Capture a monitor region and return (numpy_bgra_array, monitor_dict)."""
+    import numpy as np
+
+    shot = sct.grab(monitor)
+    return np.array(shot, dtype=np.uint8), monitor
+
+
+def _bgra_to_qpixmap(frame, QImage, QPixmap):
+    """Convert a BGRA numpy array to a QPixmap."""
+    h, w, _ = frame.shape
+    frame_rgba = frame.copy()
+    frame_rgba[:, :, 0], frame_rgba[:, :, 2] = (
+        frame[:, :, 2].copy(),
+        frame[:, :, 0].copy(),
+    )
+    qimage = QImage(frame_rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
+    return QPixmap.fromImage(qimage.copy())
+
+
 def run_roi_picker(
     config_path: str = "config.toml",
     mode: str = "garage",
@@ -131,8 +156,8 @@ def run_roi_picker(
         return None
 
     try:
-        from PyQt6.QtCore import QPoint, QRect, Qt
-        from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+        from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QTimer
+        from PyQt6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
         from PyQt6.QtWidgets import (
             QApplication,
             QDialog,
@@ -156,36 +181,45 @@ def run_roi_picker(
 
     mode_info = _MODES[mode]
 
-    # ---- Step 1: Screen selection dialog ----
+    # ---- Step 1: Screen selection dialog with thumbnails ----
 
     class ScreenPickerDialog(QDialog):
-        """Dialog listing available screens for the user to choose."""
+        """Dialog showing screen thumbnails for the user to choose."""
 
-        def __init__(self) -> None:
+        def __init__(self, thumbnails: list[tuple[QPixmap, str, int]]) -> None:
             super().__init__()
             self.selected_index: int | None = None
 
             self.setWindowTitle("TankVision — Choose Screen")
-            self.setMinimumWidth(380)
+            self.setMinimumWidth(max(400, (_THUMB_WIDTH + 40) * len(thumbnails) + 40))
 
             layout = QVBoxLayout(self)
 
             label = QLabel(
-                "Select the screen where your game is running,\n"
+                "Select the screen where your game is running, "
                 "then click Continue to draw the capture region."
             )
             label.setWordWrap(True)
             layout.addWidget(label)
 
+            # Thumbnail grid
+            thumb_layout = QHBoxLayout()
             self._list = QListWidget()
-            screens = QApplication.screens()
-            for i, screen in enumerate(screens):
-                geo = screen.geometry()
-                name = screen.name() or f"Screen {i + 1}"
-                text = f"{name}  —  {geo.width()}x{geo.height()} at ({geo.x()}, {geo.y()})"
-                item = QListWidgetItem(text)
-                item.setData(Qt.ItemDataRole.UserRole, i)
+            self._list.setViewMode(QListWidget.ViewMode.IconMode)
+            self._list.setIconSize(QSize(_THUMB_WIDTH, _THUMB_HEIGHT))
+            self._list.setSpacing(12)
+            self._list.setMovement(QListWidget.Movement.Static)
+            self._list.setResizeMode(QListWidget.ResizeMode.Adjust)
+            self._list.setMinimumHeight(_THUMB_HEIGHT + 60)
+            self._list.setWordWrap(True)
+
+            for pixmap, label_text, idx in thumbnails:
+                icon = QIcon(pixmap)
+                item = QListWidgetItem(icon, label_text)
+                item.setData(Qt.ItemDataRole.UserRole, idx)
+                item.setSizeHint(QSize(_THUMB_WIDTH + 20, _THUMB_HEIGHT + 40))
                 self._list.addItem(item)
+
             if self._list.count() > 0:
                 self._list.setCurrentRow(0)
             self._list.itemDoubleClicked.connect(self._accept)
@@ -227,7 +261,6 @@ def run_roi_picker(
                 Qt.WindowType.FramelessWindowHint
                 | Qt.WindowType.WindowStaysOnTopHint
             )
-            self.showFullScreen()
 
         def paintEvent(self, event) -> None:  # noqa: N802
             painter = QPainter(self)
@@ -316,50 +349,70 @@ def run_roi_picker(
 
     app = QApplication(sys.argv)
 
-    # Step 1: pick the screen
-    dialog = ScreenPickerDialog()
+    # Capture thumbnails for each screen
+    screens = QApplication.screens()
+    thumbnails: list[tuple[QPixmap, str, int]] = []
+    with mss.mss() as sct:
+        for i, screen in enumerate(screens):
+            geo = screen.geometry()
+            mss_idx = i + 1
+            if mss_idx < len(sct.monitors):
+                monitor = sct.monitors[mss_idx]
+            else:
+                monitor = {
+                    "left": geo.x(), "top": geo.y(),
+                    "width": geo.width(), "height": geo.height(),
+                }
+            shot = sct.grab(monitor)
+            frame = np.array(shot, dtype=np.uint8)
+            pixmap = _bgra_to_qpixmap(frame, QImage, QPixmap)
+            thumb = pixmap.scaled(
+                _THUMB_WIDTH, _THUMB_HEIGHT,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            name = screen.name() or f"Screen {i + 1}"
+            label = f"{name}\n{geo.width()}x{geo.height()}"
+            thumbnails.append((thumb, label, i))
+
+    # Step 1: show the screen picker
+    dialog = ScreenPickerDialog(thumbnails)
     if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_index is None:
         print("Calibration cancelled.")
         return None
 
     screen_idx = dialog.selected_index
-    screen = QApplication.screens()[screen_idx]
+    screen = screens[screen_idx]
     geo = screen.geometry()
     print(
         f"Selected screen: {screen.name()} "
         f"({geo.width()}x{geo.height()} at {geo.x()},{geo.y()})"
     )
 
-    # Step 2: capture that screen via mss
-    # mss monitors: [0] = virtual/all, [1..] = physical screens
-    # Qt screens are 0-indexed; mss physical monitors are 1-indexed
+    # Close the dialog and wait for it to fully disappear
+    dialog.close()
+    dialog.deleteLater()
+    app.processEvents()
+    time.sleep(0.5)
+
+    # Step 2: take a fresh screenshot (dialog is now gone)
     mss_monitor_idx = screen_idx + 1
     with mss.mss() as sct:
         if mss_monitor_idx < len(sct.monitors):
             monitor = sct.monitors[mss_monitor_idx]
         else:
-            # Fallback: use Qt geometry to define the mss region
             monitor = {
                 "left": geo.x(), "top": geo.y(),
                 "width": geo.width(), "height": geo.height(),
             }
         shot = sct.grab(monitor)
-        frame = np.array(shot, dtype=np.uint8)  # BGRA
+        frame = np.array(shot, dtype=np.uint8)
 
-    # Convert BGRA numpy array -> QPixmap
-    h, w, _ = frame.shape
-    frame_rgba = frame.copy()
-    frame_rgba[:, :, 0], frame_rgba[:, :, 2] = (
-        frame[:, :, 2].copy(),
-        frame[:, :, 0].copy(),
-    )
-    qimage = QImage(frame_rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
-    bg_pixmap = QPixmap.fromImage(qimage)
+    bg_pixmap = _bgra_to_qpixmap(frame, QImage, QPixmap)
 
-    # Step 3: show the ROI picker on that screen
+    # Step 3: show the ROI picker on the selected screen
     screen_offset = QPoint(geo.x(), geo.y())
     picker = RoiPickerWindow(bg_pixmap, screen_offset)
-    # Position the picker on the chosen screen
     picker.setGeometry(geo)
     picker.showFullScreen()
     app.exec()
