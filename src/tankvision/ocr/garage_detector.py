@@ -35,11 +35,18 @@ class GarageDetector:
         self._current_tank_id: int = 0
         self._current_tank_name: str = ""
         self._ocr = None  # Lazy-init PaddleOCR (heavy import)
+        self._ocr_unavailable = False  # True after a failed import attempt
 
-    def _ensure_ocr(self):
-        """Lazy-initialise PaddleOCR on first use."""
+    def _ensure_ocr(self) -> bool:
+        """Lazy-initialise PaddleOCR on first use.
+
+        Returns True if OCR is ready, False if unavailable.
+        Logs a warning once on the first failure, then stays silent.
+        """
         if self._ocr is not None:
-            return
+            return True
+        if self._ocr_unavailable:
+            return False
         try:
             from paddleocr import PaddleOCR
 
@@ -50,15 +57,19 @@ class GarageDetector:
                 use_gpu=False,
             )
             logger.info("PaddleOCR initialised for garage detection")
+            return True
         except ImportError:
-            raise ImportError(
-                "PaddleOCR is required for garage detection. "
+            self._ocr_unavailable = True
+            logger.warning(
+                "PaddleOCR is not installed — garage tank-name detection is disabled. "
                 "Install with: pip install 'wot-console-overlay[ocr-fallback]'"
             )
+            return False
 
     def _ocr_frame(self, frame: np.ndarray) -> str:
         """Run PaddleOCR on a BGR frame and return the concatenated text."""
-        self._ensure_ocr()
+        if not self._ensure_ocr():
+            return ""
         results = self._ocr.ocr(frame, cls=False)
         if not results or not results[0]:
             return ""
