@@ -127,7 +127,7 @@ def run_roi_picker(
 
     try:
         from PyQt6.QtCore import QPoint, QRect, Qt
-        from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+        from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
         from PyQt6.QtWidgets import QApplication, QMainWindow
     except ImportError:
         print(
@@ -136,13 +136,19 @@ def run_roi_picker(
         )
         return None
 
-    class RoiPickerWindow(QMainWindow):
-        """Fullscreen transparent overlay for selecting a screen region."""
+    import mss
+    import numpy as np
 
-        def __init__(self, cfg_path: str, picker_mode: str) -> None:
+    class RoiPickerWindow(QMainWindow):
+        """Fullscreen window showing a screenshot with a selection overlay."""
+
+        def __init__(
+            self, cfg_path: str, picker_mode: str, background: QPixmap,
+        ) -> None:
             super().__init__()
             self.config_path = Path(cfg_path)
             self._mode_info = _MODES.get(picker_mode, _MODES["garage"])
+            self._bg = background
             self._start: QPoint | None = None
             self._end: QPoint | None = None
             self._confirmed = False
@@ -152,13 +158,15 @@ def run_roi_picker(
                 Qt.WindowType.FramelessWindowHint
                 | Qt.WindowType.WindowStaysOnTopHint
             )
-            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self.showFullScreen()
 
         def paintEvent(self, event) -> None:  # noqa: N802
             painter = QPainter(self)
 
-            # Semi-transparent dark overlay
+            # Draw the desktop screenshot as background
+            painter.drawPixmap(self.rect(), self._bg)
+
+            # Semi-transparent dark tint over the whole screen
             painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
 
             # Instructions
@@ -174,14 +182,9 @@ def run_roi_picker(
             # Draw the selection rectangle
             if self._start and self._end:
                 rect = QRect(self._start, self._end).normalized()
-                # Clear the selected area (show through)
-                painter.setCompositionMode(
-                    QPainter.CompositionMode.CompositionMode_Clear
-                )
-                painter.fillRect(rect, Qt.GlobalColor.transparent)
-                painter.setCompositionMode(
-                    QPainter.CompositionMode.CompositionMode_SourceOver
-                )
+
+                # Show the un-tinted screenshot in the selected area
+                painter.drawPixmap(rect, self._bg, rect)
 
                 # Draw border
                 pen = QPen(QColor(0, 255, 0), 2)
@@ -235,8 +238,25 @@ def run_roi_picker(
                 return None
             return (rect.x(), rect.y(), rect.width(), rect.height())
 
+    # Capture a screenshot of the desktop before showing the picker window
+    with mss.mss() as sct:
+        monitor = sct.monitors[0]  # entire virtual screen
+        shot = sct.grab(monitor)
+        frame = np.array(shot, dtype=np.uint8)  # BGRA
+
+    # Convert BGRA numpy array → QPixmap
+    h, w, _ = frame.shape
+    # BGRA → RGBA for QImage
+    frame_rgba = frame.copy()
+    frame_rgba[:, :, 0], frame_rgba[:, :, 2] = (
+        frame[:, :, 2].copy(),
+        frame[:, :, 0].copy(),
+    )
+    qimage = QImage(frame_rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
+    bg_pixmap = QPixmap.fromImage(qimage)
+
     app = QApplication(sys.argv)
-    picker = RoiPickerWindow(config_path, mode)
+    picker = RoiPickerWindow(config_path, mode, bg_pixmap)
     app.exec()
 
     roi = picker.selected_roi
