@@ -238,6 +238,9 @@ def run_roi_picker(
                 return None
             return (rect.x(), rect.y(), rect.width(), rect.height())
 
+    # QApplication must exist before creating any QPixmap
+    app = QApplication(sys.argv)
+
     # Capture a screenshot of the desktop before showing the picker window
     with mss.mss() as sct:
         monitor = sct.monitors[0]  # entire virtual screen
@@ -255,7 +258,6 @@ def run_roi_picker(
     qimage = QImage(frame_rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
     bg_pixmap = QPixmap.fromImage(qimage)
 
-    app = QApplication(sys.argv)
     picker = RoiPickerWindow(config_path, mode, bg_pixmap)
     app.exec()
 
