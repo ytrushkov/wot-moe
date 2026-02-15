@@ -1,4 +1,9 @@
-"""Visual ROI picker: transparent overlay where the user drags a rectangle."""
+"""Visual ROI picker: transparent overlay where the user drags a rectangle.
+
+Two-step flow:
+1. Dialog to select which screen/monitor to use.
+2. Fullscreen overlay on that screen to drag-select the ROI.
+"""
 
 from __future__ import annotations
 
@@ -128,7 +133,17 @@ def run_roi_picker(
     try:
         from PyQt6.QtCore import QPoint, QRect, Qt
         from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
-        from PyQt6.QtWidgets import QApplication, QMainWindow
+        from PyQt6.QtWidgets import (
+            QApplication,
+            QDialog,
+            QHBoxLayout,
+            QLabel,
+            QListWidget,
+            QListWidgetItem,
+            QMainWindow,
+            QPushButton,
+            QVBoxLayout,
+        )
     except ImportError:
         print(
             "PyQt6 is required for the calibration UI.\n"
@@ -139,21 +154,75 @@ def run_roi_picker(
     import mss
     import numpy as np
 
+    mode_info = _MODES[mode]
+
+    # ---- Step 1: Screen selection dialog ----
+
+    class ScreenPickerDialog(QDialog):
+        """Dialog listing available screens for the user to choose."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.selected_index: int | None = None
+
+            self.setWindowTitle("TankVision — Choose Screen")
+            self.setMinimumWidth(380)
+
+            layout = QVBoxLayout(self)
+
+            label = QLabel(
+                "Select the screen where your game is running,\n"
+                "then click Continue to draw the capture region."
+            )
+            label.setWordWrap(True)
+            layout.addWidget(label)
+
+            self._list = QListWidget()
+            screens = QApplication.screens()
+            for i, screen in enumerate(screens):
+                geo = screen.geometry()
+                name = screen.name() or f"Screen {i + 1}"
+                text = f"{name}  —  {geo.width()}x{geo.height()} at ({geo.x()}, {geo.y()})"
+                item = QListWidgetItem(text)
+                item.setData(Qt.ItemDataRole.UserRole, i)
+                self._list.addItem(item)
+            if self._list.count() > 0:
+                self._list.setCurrentRow(0)
+            self._list.itemDoubleClicked.connect(self._accept)
+            layout.addWidget(self._list)
+
+            btn_layout = QHBoxLayout()
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.clicked.connect(self.reject)
+            btn_layout.addWidget(cancel_btn)
+
+            ok_btn = QPushButton("Continue")
+            ok_btn.setDefault(True)
+            ok_btn.clicked.connect(self._accept)
+            btn_layout.addWidget(ok_btn)
+
+            layout.addLayout(btn_layout)
+
+        def _accept(self) -> None:
+            item = self._list.currentItem()
+            if item is not None:
+                self.selected_index = item.data(Qt.ItemDataRole.UserRole)
+            self.accept()
+
+    # ---- Step 2: ROI picker overlay ----
+
     class RoiPickerWindow(QMainWindow):
         """Fullscreen window showing a screenshot with a selection overlay."""
 
-        def __init__(
-            self, cfg_path: str, picker_mode: str, background: QPixmap,
-        ) -> None:
+        def __init__(self, background: QPixmap, screen_offset: QPoint) -> None:
             super().__init__()
-            self.config_path = Path(cfg_path)
-            self._mode_info = _MODES.get(picker_mode, _MODES["garage"])
             self._bg = background
+            self._screen_offset = screen_offset
             self._start: QPoint | None = None
             self._end: QPoint | None = None
             self._confirmed = False
 
-            self.setWindowTitle(self._mode_info["title"])
+            self.setWindowTitle(mode_info["title"])
             self.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint
                 | Qt.WindowType.WindowStaysOnTopHint
@@ -176,7 +245,7 @@ def run_roi_picker(
             painter.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
-                "\n\n" + self._mode_info["instruction"],
+                "\n\n" + mode_info["instruction"],
             )
 
             # Draw the selection rectangle
@@ -191,14 +260,16 @@ def run_roi_picker(
                 painter.setPen(pen)
                 painter.drawRect(rect)
 
-                # Show dimensions
+                # Show dimensions + absolute coordinates
+                abs_x = rect.x() + self._screen_offset.x()
+                abs_y = rect.y() + self._screen_offset.y()
                 dim_font = QFont("Arial", 12)
                 painter.setFont(dim_font)
                 painter.setPen(QPen(QColor(0, 255, 0)))
                 painter.drawText(
                     rect.x(),
                     rect.y() - 5,
-                    f"{rect.width()}x{rect.height()} at ({rect.x()}, {rect.y()})",
+                    f"{rect.width()}x{rect.height()} at ({abs_x}, {abs_y})",
                 )
 
             painter.end()
@@ -230,26 +301,53 @@ def run_roi_picker(
 
         @property
         def selected_roi(self) -> tuple[int, int, int, int] | None:
-            """Return (x, y, width, height) or None if cancelled."""
+            """Return absolute (x, y, width, height) or None if cancelled."""
             if not self._confirmed or not self._start or not self._end:
                 return None
             rect = QRect(self._start, self._end).normalized()
             if rect.width() < 10 or rect.height() < 10:
                 return None
-            return (rect.x(), rect.y(), rect.width(), rect.height())
+            # Convert window-local coords to absolute screen coords
+            abs_x = rect.x() + self._screen_offset.x()
+            abs_y = rect.y() + self._screen_offset.y()
+            return (abs_x, abs_y, rect.width(), rect.height())
 
-    # QApplication must exist before creating any QPixmap
+    # ---- Launch ----
+
     app = QApplication(sys.argv)
 
-    # Capture a screenshot of the desktop before showing the picker window
+    # Step 1: pick the screen
+    dialog = ScreenPickerDialog()
+    if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_index is None:
+        print("Calibration cancelled.")
+        return None
+
+    screen_idx = dialog.selected_index
+    screen = QApplication.screens()[screen_idx]
+    geo = screen.geometry()
+    print(
+        f"Selected screen: {screen.name()} "
+        f"({geo.width()}x{geo.height()} at {geo.x()},{geo.y()})"
+    )
+
+    # Step 2: capture that screen via mss
+    # mss monitors: [0] = virtual/all, [1..] = physical screens
+    # Qt screens are 0-indexed; mss physical monitors are 1-indexed
+    mss_monitor_idx = screen_idx + 1
     with mss.mss() as sct:
-        monitor = sct.monitors[0]  # entire virtual screen
+        if mss_monitor_idx < len(sct.monitors):
+            monitor = sct.monitors[mss_monitor_idx]
+        else:
+            # Fallback: use Qt geometry to define the mss region
+            monitor = {
+                "left": geo.x(), "top": geo.y(),
+                "width": geo.width(), "height": geo.height(),
+            }
         shot = sct.grab(monitor)
         frame = np.array(shot, dtype=np.uint8)  # BGRA
 
-    # Convert BGRA numpy array → QPixmap
+    # Convert BGRA numpy array -> QPixmap
     h, w, _ = frame.shape
-    # BGRA → RGBA for QImage
     frame_rgba = frame.copy()
     frame_rgba[:, :, 0], frame_rgba[:, :, 2] = (
         frame[:, :, 2].copy(),
@@ -258,7 +356,12 @@ def run_roi_picker(
     qimage = QImage(frame_rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
     bg_pixmap = QPixmap.fromImage(qimage)
 
-    picker = RoiPickerWindow(config_path, mode, bg_pixmap)
+    # Step 3: show the ROI picker on that screen
+    screen_offset = QPoint(geo.x(), geo.y())
+    picker = RoiPickerWindow(bg_pixmap, screen_offset)
+    # Position the picker on the chosen screen
+    picker.setGeometry(geo)
+    picker.showFullScreen()
     app.exec()
 
     roi = picker.selected_roi
@@ -269,7 +372,7 @@ def run_roi_picker(
     x, y, w, h = roi
     print(f"Selected region: {w}x{h} at ({x}, {y})")
 
-    section = _MODES[mode]["section"]
+    section = mode_info["section"]
     _save_roi_to_config(roi, Path(config_path), section=section)
     print(f"Saved [{section}] ROI to {config_path}")
     return roi
