@@ -1,12 +1,15 @@
 """Visual ROI picker: transparent overlay where the user drags a rectangle.
 
 Two-step flow:
-1. Dialog to select which screen/window to capture (with thumbnails).
+1. Dialog to select which screen or window to capture (with thumbnails).
 2. Fullscreen overlay on that screen to drag-select the ROI.
 """
 
 from __future__ import annotations
 
+import json
+import platform
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -32,7 +35,7 @@ _MODES = {
     },
 }
 
-# Thumbnail size for the screen picker dialog
+# Thumbnail size for the picker dialog
 _THUMB_WIDTH = 240
 _THUMB_HEIGHT = 135
 
@@ -46,14 +49,12 @@ def _save_roi_to_config(
     x, y, w, h = roi
     section_header = f"[{section}]"
 
-    # Read existing config or start fresh
     if config_path.exists():
         text = config_path.read_text()
     else:
         text = ""
 
     if section_header in text:
-        # Replace existing roi values using line-by-line rewrite
         lines = text.splitlines(keepends=True)
         new_lines = []
         in_section = False
@@ -65,7 +66,6 @@ def _save_roi_to_config(
                 new_lines.append(line)
                 continue
             elif stripped.startswith("[") and stripped.endswith("]"):
-                # Entering a new section — write any missing keys first
                 if in_section:
                     for key, val in [
                         ("roi_x", x), ("roi_y", y),
@@ -91,7 +91,6 @@ def _save_roi_to_config(
             else:
                 new_lines.append(line)
 
-        # If target section was the last section, write missing keys
         if in_section:
             for key, val in [
                 ("roi_x", x), ("roi_y", y),
@@ -102,7 +101,6 @@ def _save_roi_to_config(
 
         text = "".join(new_lines)
     else:
-        # Append new section
         if text and not text.endswith("\n"):
             text += "\n"
         text += (
@@ -118,14 +116,6 @@ def _save_roi_to_config(
     config_path.write_text(text)
 
 
-def _grab_mss_monitor(sct, monitor: dict) -> tuple:
-    """Capture a monitor region and return (numpy_bgra_array, monitor_dict)."""
-    import numpy as np
-
-    shot = sct.grab(monitor)
-    return np.array(shot, dtype=np.uint8), monitor
-
-
 def _bgra_to_qpixmap(frame, QImage, QPixmap):
     """Convert a BGRA numpy array to a QPixmap."""
     h, w, _ = frame.shape
@@ -136,6 +126,62 @@ def _bgra_to_qpixmap(frame, QImage, QPixmap):
     )
     qimage = QImage(frame_rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
     return QPixmap.fromImage(qimage.copy())
+
+
+def _list_macos_windows() -> list[dict]:
+    """List visible application windows on macOS using JXA (JavaScript for Automation).
+
+    Returns a list of dicts with keys: app, title, x, y, width, height.
+    Returns an empty list on failure or non-macOS platforms.
+    """
+    if platform.system() != "Darwin":
+        return []
+
+    # JXA script to enumerate visible windows with their bounds
+    script = """\
+var se = Application("System Events");
+var procs = se.processes.whose({visible: true});
+var result = [];
+for (var i = 0; i < procs.length; i++) {
+    try {
+        var app = procs[i];
+        var appName = app.name();
+        var wins = app.windows();
+        for (var j = 0; j < wins.length; j++) {
+            try {
+                var w = wins[j];
+                var pos = w.position();
+                var sz = w.size();
+                if (sz[0] > 50 && sz[1] > 50) {
+                    result.push({
+                        app: appName,
+                        title: w.name() || "",
+                        x: pos[0], y: pos[1],
+                        width: sz[0], height: sz[1]
+                    });
+                }
+            } catch(e) {}
+        }
+    } catch(e) {}
+}
+JSON.stringify(result);"""
+
+    try:
+        proc = subprocess.run(
+            ["osascript", "-l", "JavaScript", "-e", script],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return json.loads(proc.stdout.strip())
+    except Exception:
+        pass
+    return []
+
+
+# Type tag stored in QListWidgetItem.data(UserRole+1) to distinguish
+# screen items from window items.
+_TAG_SCREEN = "screen"
+_TAG_WINDOW = "window"
 
 
 def run_roi_picker(
@@ -156,7 +202,7 @@ def run_roi_picker(
         return None
 
     try:
-        from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QTimer
+        from PyQt6.QtCore import QPoint, QRect, QSize, Qt
         from PyQt6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
         from PyQt6.QtWidgets import (
             QApplication,
@@ -167,7 +213,9 @@ def run_roi_picker(
             QListWidgetItem,
             QMainWindow,
             QPushButton,
+            QTabWidget,
             QVBoxLayout,
+            QWidget,
         )
     except ImportError:
         print(
@@ -181,50 +229,134 @@ def run_roi_picker(
 
     mode_info = _MODES[mode]
 
-    # ---- Step 1: Screen selection dialog with thumbnails ----
+    # ---- Picker dialog (screens + windows tabs) ----
 
-    class ScreenPickerDialog(QDialog):
-        """Dialog showing screen thumbnails for the user to choose."""
+    class PickerDialog(QDialog):
+        """Dialog with tabs for Screens and Windows, each with thumbnails."""
 
-        def __init__(self, thumbnails: list[tuple[QPixmap, str, int]]) -> None:
+        def __init__(
+            self,
+            screen_thumbs: list[tuple[QPixmap, str, int]],
+            window_entries: list[dict],
+            full_screenshots: dict[int, QPixmap],
+        ) -> None:
             super().__init__()
-            self.selected_index: int | None = None
+            self.selected_tag: str | None = None  # "screen" or "window"
+            self.selected_data: dict | None = None
 
-            self.setWindowTitle("TankVision — Choose Screen")
-            self.setMinimumWidth(max(400, (_THUMB_WIDTH + 40) * len(thumbnails) + 40))
+            self.setWindowTitle("TankVision — Choose What to Capture")
+            self.setMinimumSize(560, 400)
 
             layout = QVBoxLayout(self)
 
             label = QLabel(
-                "Select the screen where your game is running, "
+                "Select a screen or application window, "
                 "then click Continue to draw the capture region."
             )
             label.setWordWrap(True)
             layout.addWidget(label)
 
-            # Thumbnail grid
-            thumb_layout = QHBoxLayout()
-            self._list = QListWidget()
-            self._list.setViewMode(QListWidget.ViewMode.IconMode)
-            self._list.setIconSize(QSize(_THUMB_WIDTH, _THUMB_HEIGHT))
-            self._list.setSpacing(12)
-            self._list.setMovement(QListWidget.Movement.Static)
-            self._list.setResizeMode(QListWidget.ResizeMode.Adjust)
-            self._list.setMinimumHeight(_THUMB_HEIGHT + 60)
-            self._list.setWordWrap(True)
+            tabs = QTabWidget()
 
-            for pixmap, label_text, idx in thumbnails:
-                icon = QIcon(pixmap)
-                item = QListWidgetItem(icon, label_text)
-                item.setData(Qt.ItemDataRole.UserRole, idx)
+            # --- Screens tab ---
+            screen_tab = QWidget()
+            sl = QVBoxLayout(screen_tab)
+            self._screen_list = QListWidget()
+            self._screen_list.setViewMode(QListWidget.ViewMode.IconMode)
+            self._screen_list.setIconSize(QSize(_THUMB_WIDTH, _THUMB_HEIGHT))
+            self._screen_list.setSpacing(12)
+            self._screen_list.setMovement(QListWidget.Movement.Static)
+            self._screen_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+            self._screen_list.setMinimumHeight(_THUMB_HEIGHT + 60)
+            self._screen_list.setWordWrap(True)
+            for pixmap, lbl, idx in screen_thumbs:
+                item = QListWidgetItem(QIcon(pixmap), lbl)
+                item.setData(Qt.ItemDataRole.UserRole, {
+                    "tag": _TAG_SCREEN, "screen_idx": idx,
+                })
                 item.setSizeHint(QSize(_THUMB_WIDTH + 20, _THUMB_HEIGHT + 40))
-                self._list.addItem(item)
+                self._screen_list.addItem(item)
+            if self._screen_list.count() > 0:
+                self._screen_list.setCurrentRow(0)
+            self._screen_list.itemDoubleClicked.connect(self._accept)
+            sl.addWidget(self._screen_list)
+            tabs.addTab(screen_tab, "Screens")
 
-            if self._list.count() > 0:
-                self._list.setCurrentRow(0)
-            self._list.itemDoubleClicked.connect(self._accept)
-            layout.addWidget(self._list)
+            # --- Windows tab ---
+            win_tab = QWidget()
+            wl = QVBoxLayout(win_tab)
+            self._win_list = QListWidget()
+            self._win_list.setViewMode(QListWidget.ViewMode.IconMode)
+            self._win_list.setIconSize(QSize(_THUMB_WIDTH, _THUMB_HEIGHT))
+            self._win_list.setSpacing(12)
+            self._win_list.setMovement(QListWidget.Movement.Static)
+            self._win_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+            self._win_list.setMinimumHeight(_THUMB_HEIGHT + 60)
+            self._win_list.setWordWrap(True)
 
+            for winfo in window_entries:
+                # Crop the window region from the full screen screenshot
+                # to create a thumbnail
+                wx, wy = int(winfo["x"]), int(winfo["y"])
+                ww, wh = int(winfo["width"]), int(winfo["height"])
+                # Find which screen contains this window
+                best_screen_idx = 0
+                for si, (_, _, sidx) in enumerate(screen_thumbs):
+                    s = QApplication.screens()[sidx]
+                    sg = s.geometry()
+                    if sg.contains(QPoint(wx + ww // 2, wy + wh // 2)):
+                        best_screen_idx = sidx
+                        break
+
+                full_pm = full_screenshots.get(best_screen_idx)
+                if full_pm is not None:
+                    sg = QApplication.screens()[best_screen_idx].geometry()
+                    # Window coords relative to the screen
+                    rx = wx - sg.x()
+                    ry = wy - sg.y()
+                    crop_rect = QRect(rx, ry, ww, wh)
+                    crop_rect = crop_rect.intersected(QRect(0, 0, full_pm.width(), full_pm.height()))
+                    if crop_rect.width() > 10 and crop_rect.height() > 10:
+                        win_pixmap = full_pm.copy(crop_rect)
+                    else:
+                        win_pixmap = full_pm
+                else:
+                    win_pixmap = QPixmap(_THUMB_WIDTH, _THUMB_HEIGHT)
+                    win_pixmap.fill(QColor(40, 40, 40))
+
+                thumb = win_pixmap.scaled(
+                    _THUMB_WIDTH, _THUMB_HEIGHT,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+
+                title = winfo.get("title", "")
+                app_name = winfo.get("app", "")
+                lbl = app_name
+                if title and title != app_name:
+                    lbl += f"\n{title[:40]}"
+
+                item = QListWidgetItem(QIcon(thumb), lbl)
+                item.setData(Qt.ItemDataRole.UserRole, {
+                    "tag": _TAG_WINDOW,
+                    "screen_idx": best_screen_idx,
+                    "x": wx, "y": wy, "width": ww, "height": wh,
+                })
+                item.setSizeHint(QSize(_THUMB_WIDTH + 20, _THUMB_HEIGHT + 40))
+                self._win_list.addItem(item)
+
+            if self._win_list.count() > 0:
+                self._win_list.setCurrentRow(0)
+            self._win_list.itemDoubleClicked.connect(self._accept)
+            wl.addWidget(self._win_list)
+
+            if self._win_list.count() > 0:
+                tabs.addTab(win_tab, "Windows")
+
+            self._tabs = tabs
+            layout.addWidget(tabs)
+
+            # Buttons
             btn_layout = QHBoxLayout()
             cancel_btn = QPushButton("Cancel")
             cancel_btn.clicked.connect(self.reject)
@@ -237,13 +369,23 @@ def run_roi_picker(
 
             layout.addLayout(btn_layout)
 
+        def _current_list(self) -> QListWidget:
+            """Return the list widget in the active tab."""
+            w = self._tabs.currentWidget()
+            if w is None:
+                return self._screen_list
+            lst = w.findChild(QListWidget)
+            return lst if lst is not None else self._screen_list
+
         def _accept(self) -> None:
-            item = self._list.currentItem()
+            item = self._current_list().currentItem()
             if item is not None:
-                self.selected_index = item.data(Qt.ItemDataRole.UserRole)
+                data = item.data(Qt.ItemDataRole.UserRole)
+                self.selected_tag = data["tag"]
+                self.selected_data = data
             self.accept()
 
-    # ---- Step 2: ROI picker overlay ----
+    # ---- ROI picker overlay ----
 
     class RoiPickerWindow(QMainWindow):
         """Fullscreen window showing a screenshot with a selection overlay."""
@@ -264,14 +406,9 @@ def run_roi_picker(
 
         def paintEvent(self, event) -> None:  # noqa: N802
             painter = QPainter(self)
-
-            # Draw the desktop screenshot as background
             painter.drawPixmap(self.rect(), self._bg)
-
-            # Semi-transparent dark tint over the whole screen
             painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
 
-            # Instructions
             painter.setPen(QPen(QColor(255, 255, 255)))
             font = QFont("Arial", 18)
             painter.setFont(font)
@@ -281,19 +418,13 @@ def run_roi_picker(
                 "\n\n" + mode_info["instruction"],
             )
 
-            # Draw the selection rectangle
             if self._start and self._end:
                 rect = QRect(self._start, self._end).normalized()
-
-                # Show the un-tinted screenshot in the selected area
                 painter.drawPixmap(rect, self._bg, rect)
-
-                # Draw border
                 pen = QPen(QColor(0, 255, 0), 2)
                 painter.setPen(pen)
                 painter.drawRect(rect)
 
-                # Show dimensions + absolute coordinates
                 abs_x = rect.x() + self._screen_offset.x()
                 abs_y = rect.y() + self._screen_offset.y()
                 dim_font = QFont("Arial", 12)
@@ -340,7 +471,6 @@ def run_roi_picker(
             rect = QRect(self._start, self._end).normalized()
             if rect.width() < 10 or rect.height() < 10:
                 return None
-            # Convert window-local coords to absolute screen coords
             abs_x = rect.x() + self._screen_offset.x()
             abs_y = rect.y() + self._screen_offset.y()
             return (abs_x, abs_y, rect.width(), rect.height())
@@ -349,9 +479,11 @@ def run_roi_picker(
 
     app = QApplication(sys.argv)
 
-    # Capture thumbnails for each screen
+    # Capture full screenshots for each screen (used for thumbnails + cropping)
     screens = QApplication.screens()
-    thumbnails: list[tuple[QPixmap, str, int]] = []
+    screen_thumbs: list[tuple[QPixmap, str, int]] = []
+    full_screenshots: dict[int, QPixmap] = {}
+
     with mss.mss() as sct:
         for i, screen in enumerate(screens):
             geo = screen.geometry()
@@ -366,6 +498,7 @@ def run_roi_picker(
             shot = sct.grab(monitor)
             frame = np.array(shot, dtype=np.uint8)
             pixmap = _bgra_to_qpixmap(frame, QImage, QPixmap)
+            full_screenshots[i] = pixmap
             thumb = pixmap.scaled(
                 _THUMB_WIDTH, _THUMB_HEIGHT,
                 Qt.AspectRatioMode.KeepAspectRatio,
@@ -373,29 +506,39 @@ def run_roi_picker(
             )
             name = screen.name() or f"Screen {i + 1}"
             label = f"{name}\n{geo.width()}x{geo.height()}"
-            thumbnails.append((thumb, label, i))
+            screen_thumbs.append((thumb, label, i))
 
-    # Step 1: show the screen picker
-    dialog = ScreenPickerDialog(thumbnails)
-    if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_index is None:
+    # Enumerate application windows (macOS only, best-effort)
+    window_entries = _list_macos_windows()
+
+    # Step 1: show the picker dialog
+    dialog = PickerDialog(screen_thumbs, window_entries, full_screenshots)
+    if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_data is None:
         print("Calibration cancelled.")
         return None
 
-    screen_idx = dialog.selected_index
+    data = dialog.selected_data
+    screen_idx = data["screen_idx"]
     screen = screens[screen_idx]
     geo = screen.geometry()
-    print(
-        f"Selected screen: {screen.name()} "
-        f"({geo.width()}x{geo.height()} at {geo.x()},{geo.y()})"
-    )
 
-    # Close the dialog and wait for it to fully disappear
-    dialog.close()
-    dialog.deleteLater()
+    if data["tag"] == _TAG_WINDOW:
+        print(f"Selected window on screen {screen.name()}")
+    else:
+        print(
+            f"Selected screen: {screen.name()} "
+            f"({geo.width()}x{geo.height()} at {geo.x()},{geo.y()})"
+        )
+
+    # Fully destroy the dialog before taking the fresh screenshot
+    dialog.hide()
+    dialog.destroy()
     app.processEvents()
-    time.sleep(0.5)
+    time.sleep(0.3)
+    app.processEvents()
+    time.sleep(0.3)
 
-    # Step 2: take a fresh screenshot (dialog is now gone)
+    # Step 2: take a fresh screenshot (dialog is gone)
     mss_monitor_idx = screen_idx + 1
     with mss.mss() as sct:
         if mss_monitor_idx < len(sct.monitors):
