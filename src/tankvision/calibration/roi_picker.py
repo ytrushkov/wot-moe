@@ -1,16 +1,9 @@
 """Visual ROI picker: transparent overlay where the user drags a rectangle."""
 
+from __future__ import annotations
+
 import sys
 from pathlib import Path
-
-from PyQt6.QtCore import QPoint, QRect, Qt
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
-from PyQt6.QtWidgets import QApplication, QMainWindow
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 
 _MODES = {
@@ -32,107 +25,6 @@ _MODES = {
         "section": "ocr",
     },
 }
-
-
-class RoiPickerWindow(QMainWindow):
-    """Fullscreen transparent overlay for selecting a screen region.
-
-    The user clicks and drags to draw a rectangle, then presses Enter to confirm
-    or Escape to cancel.
-    """
-
-    def __init__(self, config_path: str = "config.toml", mode: str = "garage") -> None:
-        super().__init__()
-        self.config_path = Path(config_path)
-        self.mode = mode
-        self._mode_info = _MODES.get(mode, _MODES["garage"])
-        self._start: QPoint | None = None
-        self._end: QPoint | None = None
-        self._confirmed = False
-
-        self.setWindowTitle(self._mode_info["title"])
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.showFullScreen()
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        painter = QPainter(self)
-
-        # Semi-transparent dark overlay
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
-
-        # Instructions
-        painter.setPen(QPen(QColor(255, 255, 255)))
-        font = QFont("Arial", 18)
-        painter.setFont(font)
-        painter.drawText(
-            self.rect(),
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
-            "\n\n" + self._mode_info["instruction"],
-        )
-
-        # Draw the selection rectangle
-        if self._start and self._end:
-            rect = QRect(self._start, self._end).normalized()
-            # Clear the selected area (show through)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            painter.fillRect(rect, Qt.GlobalColor.transparent)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-
-            # Draw border
-            pen = QPen(QColor(0, 255, 0), 2)
-            painter.setPen(pen)
-            painter.drawRect(rect)
-
-            # Show dimensions
-            dim_font = QFont("Arial", 12)
-            painter.setFont(dim_font)
-            painter.setPen(QPen(QColor(0, 255, 0)))
-            painter.drawText(
-                rect.x(),
-                rect.y() - 5,
-                f"{rect.width()}x{rect.height()} at ({rect.x()}, {rect.y()})",
-            )
-
-        painter.end()
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._start = event.pos()
-            self._end = event.pos()
-            self.update()
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._start is not None:
-            self._end = event.pos()
-            self.update()
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and self._start:
-            self._end = event.pos()
-            self.update()
-
-    def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
-            if self._start and self._end:
-                self._confirmed = True
-                self.close()
-        elif event.key() == Qt.Key.Key_Escape:
-            self._confirmed = False
-            self.close()
-
-    @property
-    def selected_roi(self) -> tuple[int, int, int, int] | None:
-        """Return (x, y, width, height) or None if cancelled."""
-        if not self._confirmed or not self._start or not self._end:
-            return None
-        rect = QRect(self._start, self._end).normalized()
-        if rect.width() < 10 or rect.height() < 10:
-            return None
-        return (rect.x(), rect.y(), rect.width(), rect.height())
 
 
 def _save_roi_to_config(
@@ -233,8 +125,118 @@ def run_roi_picker(
         print(f"Unknown calibration mode '{mode}'. Use 'garage' or 'ocr'.")
         return None
 
+    try:
+        from PyQt6.QtCore import QPoint, QRect, Qt
+        from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+        from PyQt6.QtWidgets import QApplication, QMainWindow
+    except ImportError:
+        print(
+            "PyQt6 is required for the calibration UI.\n"
+            "Install it with: pip install 'wot-console-overlay[ui]'"
+        )
+        return None
+
+    class RoiPickerWindow(QMainWindow):
+        """Fullscreen transparent overlay for selecting a screen region."""
+
+        def __init__(self, cfg_path: str, picker_mode: str) -> None:
+            super().__init__()
+            self.config_path = Path(cfg_path)
+            self._mode_info = _MODES.get(picker_mode, _MODES["garage"])
+            self._start: QPoint | None = None
+            self._end: QPoint | None = None
+            self._confirmed = False
+
+            self.setWindowTitle(self._mode_info["title"])
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+            )
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self.showFullScreen()
+
+        def paintEvent(self, event) -> None:  # noqa: N802
+            painter = QPainter(self)
+
+            # Semi-transparent dark overlay
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+
+            # Instructions
+            painter.setPen(QPen(QColor(255, 255, 255)))
+            font = QFont("Arial", 18)
+            painter.setFont(font)
+            painter.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
+                "\n\n" + self._mode_info["instruction"],
+            )
+
+            # Draw the selection rectangle
+            if self._start and self._end:
+                rect = QRect(self._start, self._end).normalized()
+                # Clear the selected area (show through)
+                painter.setCompositionMode(
+                    QPainter.CompositionMode.CompositionMode_Clear
+                )
+                painter.fillRect(rect, Qt.GlobalColor.transparent)
+                painter.setCompositionMode(
+                    QPainter.CompositionMode.CompositionMode_SourceOver
+                )
+
+                # Draw border
+                pen = QPen(QColor(0, 255, 0), 2)
+                painter.setPen(pen)
+                painter.drawRect(rect)
+
+                # Show dimensions
+                dim_font = QFont("Arial", 12)
+                painter.setFont(dim_font)
+                painter.setPen(QPen(QColor(0, 255, 0)))
+                painter.drawText(
+                    rect.x(),
+                    rect.y() - 5,
+                    f"{rect.width()}x{rect.height()} at ({rect.x()}, {rect.y()})",
+                )
+
+            painter.end()
+
+        def mousePressEvent(self, event) -> None:  # noqa: N802
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._start = event.pos()
+                self._end = event.pos()
+                self.update()
+
+        def mouseMoveEvent(self, event) -> None:  # noqa: N802
+            if self._start is not None:
+                self._end = event.pos()
+                self.update()
+
+        def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+            if event.button() == Qt.MouseButton.LeftButton and self._start:
+                self._end = event.pos()
+                self.update()
+
+        def keyPressEvent(self, event) -> None:  # noqa: N802
+            if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+                if self._start and self._end:
+                    self._confirmed = True
+                    self.close()
+            elif event.key() == Qt.Key.Key_Escape:
+                self._confirmed = False
+                self.close()
+
+        @property
+        def selected_roi(self) -> tuple[int, int, int, int] | None:
+            """Return (x, y, width, height) or None if cancelled."""
+            if not self._confirmed or not self._start or not self._end:
+                return None
+            rect = QRect(self._start, self._end).normalized()
+            if rect.width() < 10 or rect.height() < 10:
+                return None
+            return (rect.x(), rect.y(), rect.width(), rect.height())
+
     app = QApplication(sys.argv)
-    picker = RoiPickerWindow(config_path, mode=mode)
+    picker = RoiPickerWindow(config_path, mode)
     app.exec()
 
     roi = picker.selected_roi
