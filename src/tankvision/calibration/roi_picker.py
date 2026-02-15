@@ -13,6 +13,27 @@ else:
     import tomli as tomllib
 
 
+_MODES = {
+    "garage": {
+        "title": "TankVision — Select Tank Name Region",
+        "instruction": (
+            "Drag a rectangle over the tank name in the garage.\n"
+            "Press ENTER to confirm, ESC to cancel."
+        ),
+        "section": "garage",
+    },
+    "ocr": {
+        "title": "TankVision — Select Damage Number Region",
+        "instruction": (
+            "Drag a rectangle over the damage numbers shown during battle.\n"
+            "Include both direct and assisted damage areas.\n"
+            "Press ENTER to confirm, ESC to cancel."
+        ),
+        "section": "ocr",
+    },
+}
+
+
 class RoiPickerWindow(QMainWindow):
     """Fullscreen transparent overlay for selecting a screen region.
 
@@ -20,14 +41,16 @@ class RoiPickerWindow(QMainWindow):
     or Escape to cancel.
     """
 
-    def __init__(self, config_path: str = "config.toml") -> None:
+    def __init__(self, config_path: str = "config.toml", mode: str = "garage") -> None:
         super().__init__()
         self.config_path = Path(config_path)
+        self.mode = mode
+        self._mode_info = _MODES.get(mode, _MODES["garage"])
         self._start: QPoint | None = None
         self._end: QPoint | None = None
         self._confirmed = False
 
-        self.setWindowTitle("TankVision — Select Tank Name Region")
+        self.setWindowTitle(self._mode_info["title"])
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -48,8 +71,7 @@ class RoiPickerWindow(QMainWindow):
         painter.drawText(
             self.rect(),
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
-            "\n\nDrag a rectangle over the tank name in the garage.\n"
-            "Press ENTER to confirm, ESC to cancel.",
+            "\n\n" + self._mode_info["instruction"],
         )
 
         # Draw the selection rectangle
@@ -113,9 +135,14 @@ class RoiPickerWindow(QMainWindow):
         return (rect.x(), rect.y(), rect.width(), rect.height())
 
 
-def _save_roi_to_config(roi: tuple[int, int, int, int], config_path: Path) -> None:
-    """Write the garage ROI into the config file, preserving other settings."""
+def _save_roi_to_config(
+    roi: tuple[int, int, int, int],
+    config_path: Path,
+    section: str = "garage",
+) -> None:
+    """Write the ROI into the given config section, preserving other settings."""
     x, y, w, h = roi
+    section_header = f"[{section}]"
 
     # Read existing config or start fresh
     if config_path.exists():
@@ -123,80 +150,91 @@ def _save_roi_to_config(roi: tuple[int, int, int, int], config_path: Path) -> No
     else:
         text = ""
 
-    # Check if [garage] section exists
-    if "[garage]" in text:
+    if section_header in text:
         # Replace existing roi values using line-by-line rewrite
         lines = text.splitlines(keepends=True)
         new_lines = []
-        in_garage = False
-        garage_keys_written = set()
+        in_section = False
+        keys_written: set[str] = set()
         for line in lines:
             stripped = line.strip()
-            if stripped == "[garage]":
-                in_garage = True
+            if stripped == section_header:
+                in_section = True
                 new_lines.append(line)
                 continue
             elif stripped.startswith("[") and stripped.endswith("]"):
-                # Entering a new section — write any missing garage keys first
-                if in_garage:
+                # Entering a new section — write any missing keys first
+                if in_section:
                     for key, val in [
                         ("roi_x", x), ("roi_y", y),
                         ("roi_width", w), ("roi_height", h),
                     ]:
-                        if key not in garage_keys_written:
+                        if key not in keys_written:
                             new_lines.append(f"{key} = {val}\n")
-                in_garage = False
+                in_section = False
                 new_lines.append(line)
                 continue
 
-            if in_garage:
+            if in_section:
                 for key, val in [
                     ("roi_x", x), ("roi_y", y),
                     ("roi_width", w), ("roi_height", h),
                 ]:
                     if stripped.startswith(f"{key}"):
                         new_lines.append(f"{key} = {val}\n")
-                        garage_keys_written.add(key)
+                        keys_written.add(key)
                         break
                 else:
                     new_lines.append(line)
             else:
                 new_lines.append(line)
 
-        # If [garage] was the last section, write missing keys
-        if in_garage:
+        # If target section was the last section, write missing keys
+        if in_section:
             for key, val in [
                 ("roi_x", x), ("roi_y", y),
                 ("roi_width", w), ("roi_height", h),
             ]:
-                if key not in garage_keys_written:
+                if key not in keys_written:
                     new_lines.append(f"{key} = {val}\n")
 
         text = "".join(new_lines)
     else:
-        # Append [garage] section
+        # Append new section
         if text and not text.endswith("\n"):
             text += "\n"
         text += (
-            f"\n[garage]\n"
+            f"\n{section_header}\n"
             f"roi_x = {x}\n"
             f"roi_y = {y}\n"
             f"roi_width = {w}\n"
             f"roi_height = {h}\n"
-            f"poll_interval = 3.0\n"
         )
+        if section == "garage":
+            text += "poll_interval = 3.0\n"
 
     config_path.write_text(text)
 
 
-def run_roi_picker(config_path: str = "config.toml") -> tuple[int, int, int, int] | None:
+def run_roi_picker(
+    config_path: str = "config.toml",
+    mode: str = "garage",
+) -> tuple[int, int, int, int] | None:
     """Launch the ROI picker and save result to config.
+
+    Args:
+        config_path: Path to the TOML config file.
+        mode: "garage" for tank name region, "ocr" for damage number region.
 
     Returns:
         The selected (x, y, width, height) or None if cancelled.
     """
+    if mode not in _MODES:
+        print(f"Unknown calibration mode '{mode}'. Use 'garage' or 'ocr'.")
+        return None
+
     app = QApplication(sys.argv)
-    picker = RoiPickerWindow(config_path)
+    picker = RoiPickerWindow(config_path, mode=mode)
     app.exec()
 
     roi = picker.selected_roi
@@ -207,6 +245,7 @@ def run_roi_picker(config_path: str = "config.toml") -> tuple[int, int, int, int
     x, y, w, h = roi
     print(f"Selected region: {w}x{h} at ({x}, {y})")
 
-    _save_roi_to_config(roi, Path(config_path))
-    print(f"Saved to {config_path}")
+    section = _MODES[mode]["section"]
+    _save_roi_to_config(roi, Path(config_path), section=section)
+    print(f"Saved [{section}] ROI to {config_path}")
     return roi

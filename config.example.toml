@@ -22,7 +22,7 @@ poll_interval = 0.5
 
 [ocr]
 # Region of interest for damage numbers (screen coordinates)
-# Set via calibration UI or manually
+# Set via: tankvision --calibrate ocr
 roi_x = 0
 roi_y = 0
 roi_width = 300

@@ -326,15 +326,24 @@ async def run(config_path: str = "config.toml") -> None:
             logger.info("Restored persisted MoE: %.2f%%", current_moe)
 
     # --- Build pipeline components ---
-    capture = ScreenCapture(
-        roi=(
-            config["ocr"]["roi_x"],
-            config["ocr"]["roi_y"],
-            config["ocr"]["roi_width"],
-            config["ocr"]["roi_height"],
-        ),
-        sample_rate=config["ocr"]["sample_rate"],
+    ocr_roi = (
+        config["ocr"]["roi_x"],
+        config["ocr"]["roi_y"],
+        config["ocr"]["roi_width"],
+        config["ocr"]["roi_height"],
     )
+    capture = ScreenCapture(roi=ocr_roi, sample_rate=config["ocr"]["sample_rate"])
+
+    # Log the capture region so the user knows what's being OCR'd
+    logger.info(
+        "OCR capture region: %dx%d at (%d, %d)",
+        ocr_roi[2], ocr_roi[3], ocr_roi[0], ocr_roi[1],
+    )
+    if ocr_roi == (0, 0, 300, 100):
+        logger.warning(
+            "OCR region is at default values — damage numbers probably won't be detected. "
+            "Run `tankvision --calibrate ocr` to select the damage number area on screen."
+        )
 
     ocr = OcrPipeline(
         confidence_threshold=config["ocr"]["confidence_threshold"],
@@ -521,17 +530,23 @@ def main() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    # Parse --calibrate flag
+    # Parse --calibrate [mode] flag
     args = sys.argv[1:]
-    calibrate = "--calibrate" in args
-    if calibrate:
-        args.remove("--calibrate")
+    calibrate_mode: str | None = None
+    if "--calibrate" in args:
+        idx = args.index("--calibrate")
+        args.pop(idx)
+        # Next arg is the mode (garage or ocr), default to "ocr"
+        if idx < len(args) and not args[idx].endswith(".toml"):
+            calibrate_mode = args.pop(idx)
+        else:
+            calibrate_mode = "ocr"
     config_path = args[0] if args else "config.toml"
 
-    if calibrate:
+    if calibrate_mode is not None:
         from tankvision.calibration.roi_picker import run_roi_picker
 
-        run_roi_picker(config_path)
+        run_roi_picker(config_path, mode=calibrate_mode)
         return
 
     asyncio.run(run(config_path))
