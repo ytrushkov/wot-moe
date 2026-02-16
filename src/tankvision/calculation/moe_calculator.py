@@ -72,6 +72,11 @@ class MoeCalculator:
         self._session_start_moe = current_moe
         self._battles_this_session = 0
 
+        # For post-battle API correction: remember EMA before the last update
+        # so we can undo the estimated update and redo with corrected damage.
+        self._ema_before_last_battle: float | None = None
+        self._last_battle_damage: int = 0
+
         self._detector = BattleDetector()
         self._current_damage = DamageReading(0, 0)
 
@@ -105,6 +110,8 @@ class MoeCalculator:
         if battle_status == "battle_ended":
             # Finalize the battle: update EMA with the last known damage
             final_damage = self._detector.last_battle_damage
+            self._ema_before_last_battle = self._ema
+            self._last_battle_damage = final_damage
             self._ema = compute_ema_update(self._ema, final_damage, self.ema_alpha)
             self._battles_this_session += 1
             logger.info(
@@ -145,4 +152,77 @@ class MoeCalculator:
         self._ema = self._moe_to_ema(current_moe) if target_damage > 0 else 0.0
         self._session_start_moe = current_moe
         self._battles_this_session = 0
+        self._ema_before_last_battle = None
+        self._last_battle_damage = 0
         self._detector.reset()
+
+    def correct_last_battle(self, corrected_damage: int) -> MoeState | None:
+        """Re-compute the last EMA update using corrected damage from the API.
+
+        The in-game HUD shows combined assisted damage (tracking + spotting),
+        but WG's MoE formula uses max(tracking, spotting). This causes our
+        OCR-based estimate to be inflated. After a battle, the API's cumulative
+        stat deltas give us the server-side value, which we use to correct.
+
+        Args:
+            corrected_damage: The server-side combined damage for the last battle.
+
+        Returns:
+            Updated MoeState reflecting the correction, or None if no battle to correct.
+        """
+        if self._ema_before_last_battle is None:
+            return None
+
+        old_estimated_moe = self._ema_to_moe(self._ema)
+        self._ema = compute_ema_update(
+            self._ema_before_last_battle, corrected_damage, self.ema_alpha
+        )
+        corrected_moe = self._ema_to_moe(self._ema)
+        self._ema_before_last_battle = None
+
+        logger.info(
+            "API correction: ocr_damage=%d, api_damage=%d, moe %.2f%% → %.2f%%",
+            self._last_battle_damage,
+            corrected_damage,
+            old_estimated_moe,
+            corrected_moe,
+        )
+
+        return self._build_state("idle")
+
+    def set_moe_from_api(self, moe_percent: float) -> None:
+        """Override the current EMA with a known MoE percentage from an external source."""
+        self._ema = self._moe_to_ema(moe_percent)
+        logger.info("MoE set from API: %.2f%% (ema=%.1f)", moe_percent, self._ema)
+
+    @property
+    def ema(self) -> float:
+        """Current EMA value (for persistence)."""
+        return self._ema
+
+    @property
+    def current_moe(self) -> float:
+        """Current MoE percentage."""
+        return self._ema_to_moe(self._ema)
+
+    @property
+    def battles_this_session(self) -> int:
+        return self._battles_this_session
+
+    def _build_state(self, status: str) -> MoeState:
+        """Build a MoeState from current internal state."""
+        current_moe = self._ema_to_moe(self._ema)
+        return MoeState(
+            tank_name=self.tank_name,
+            moe_percent=current_moe,
+            projected_moe_percent=current_moe,
+            delta=current_moe - self._session_start_moe,
+            ema=self._ema,
+            target_damage=self.target_damage,
+            direct_damage=self._current_damage.direct_damage,
+            assisted_damage=self._current_damage.assisted_damage,
+            combined_damage=self._current_damage.combined,
+            battles_this_session=self._battles_this_session,
+            in_battle=self._detector.in_battle,
+            status=status,
+        )

@@ -20,9 +20,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ocr = [
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0",
+]
 ocr-fallback = [
     "paddleocr>=2.7",
-    "paddlepaddle>=2.5",
+    "paddlepaddle>=2.6.2",
 ]
 ui = [
     "PyQt6>=6.5",
@@ -48,3 +52,6 @@ select = ["E", "F", "W", "I", "N", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: tests that hit the live Wargaming API (require network)",
+]

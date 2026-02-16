@@ -18,6 +18,13 @@ DEFAULTS: dict[str, Any] = {
         "gamertag": "",
         "platform": "xbox",
     },
+    "garage": {
+        "roi_x": 0,
+        "roi_y": 0,
+        "roi_width": 0,
+        "roi_height": 0,
+        "poll_interval": 0.5,
+    },
     "ocr": {
         "roi_x": 0,
         "roi_y": 0,

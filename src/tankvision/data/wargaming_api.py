@@ -1,17 +1,18 @@
-"""Wargaming API client for World of Tanks Console (WOTX)."""
+"""Wargaming API client for World of Tanks Console (WoTC)."""
 
 import logging
+import time
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# Base URLs per platform
-BASE_URLS = {
-    "xbox": "https://api-xbox-console.worldoftanks.com/wotx",
-    "ps": "https://api-ps4-console.worldoftanks.com/wotx",
-}
+# Unified WoT Console API base URL (post-crossplay).
+# The old per-platform endpoints (api-xbox-console / api-ps4-console) were
+# consolidated into a single crossplay endpoint.  The path prefix is /wotx.
+BASE_URL = "https://api-console.worldoftanks.com/wotx"
 
 # Default application_id shipped with TankVision.
 # Users can override this in config.toml [api] section.
@@ -23,6 +24,11 @@ class WargamingApiError(Exception):
     """Raised when the Wargaming API returns an error."""
 
 
+# Default cache TTL in seconds.  Keeps rapid garage-scroll tank switches
+# from hammering the WG API (one request per 0.5 s poll interval).
+_DEFAULT_CACHE_TTL = 30.0
+
+
 class WargamingApi:
     """Async client for the Wargaming WoT Console API.
 
@@ -30,6 +36,7 @@ class WargamingApi:
         application_id: API key from developers.wargaming.net. Use "demo" for testing.
         platform: "xbox" or "ps".
         session: Optional aiohttp session to reuse. If None, creates one internally.
+        cache_ttl: How long (seconds) to cache GET responses.  Set to 0 to disable.
     """
 
     def __init__(
@@ -37,14 +44,18 @@ class WargamingApi:
         application_id: str = DEFAULT_APP_ID,
         platform: str = "xbox",
         session: aiohttp.ClientSession | None = None,
+        cache_ttl: float = _DEFAULT_CACHE_TTL,
     ) -> None:
-        if platform not in BASE_URLS:
+        if platform not in ("xbox", "ps"):
             raise ValueError(f"Unknown platform: {platform!r}. Must be 'xbox' or 'ps'.")
         self.application_id = application_id
         self.platform = platform
-        self.base_url = BASE_URLS[platform]
+        self.base_url = BASE_URL
         self._session = session
         self._owns_session = session is None
+        self._cache_ttl = cache_ttl
+        # {cache_key: (timestamp, data)}
+        self._cache: dict[str, tuple[float, dict]] = {}
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -56,8 +67,26 @@ class WargamingApi:
         if self._owns_session and self._session and not self._session.closed:
             await self._session.close()
 
+    def _cache_key(self, endpoint: str, params: dict[str, str]) -> str:
+        """Build a deterministic cache key from endpoint + sorted params."""
+        sorted_params = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        return f"{endpoint}?{sorted_params}"
+
+    def invalidate_cache(self, endpoint: str | None = None) -> None:
+        """Drop cached responses.  If *endpoint* is given, only drop entries for it."""
+        if endpoint is None:
+            self._cache.clear()
+        else:
+            self._cache = {
+                k: v for k, v in self._cache.items() if not k.startswith(endpoint)
+            }
+
     async def _request(self, endpoint: str, **params: Any) -> dict:
         """Make a GET request to the Wargaming API.
+
+        Responses are cached for ``cache_ttl`` seconds so that rapid
+        back-to-back calls (e.g. during garage tank scrolling) do not
+        generate redundant network traffic.
 
         Args:
             endpoint: API path (e.g., "/account/list/").
@@ -69,8 +98,16 @@ class WargamingApi:
         Raises:
             WargamingApiError: If the API returns an error status.
         """
-        session = await self._ensure_session()
         params["application_id"] = self.application_id
+        cache_key = self._cache_key(endpoint, params)
+
+        # Check cache
+        if self._cache_ttl > 0 and cache_key in self._cache:
+            ts, cached_data = self._cache[cache_key]
+            if time.monotonic() - ts < self._cache_ttl:
+                return cached_data
+
+        session = await self._ensure_session()
         url = f"{self.base_url}{endpoint}"
 
         async with session.get(url, params=params) as resp:
@@ -82,7 +119,13 @@ class WargamingApi:
             code = error.get("code", 0)
             raise WargamingApiError(f"API error {code}: {msg}")
 
-        return body.get("data", {})
+        data = body.get("data", {})
+
+        # Store in cache
+        if self._cache_ttl > 0:
+            self._cache[cache_key] = (time.monotonic(), data)
+
+        return data
 
     # --- Player endpoints ---
 
@@ -162,3 +205,85 @@ class WargamingApi:
         if results:
             return results[0].get("account_id")
         return None
+
+    async def get_tank_snapshot(self, account_id: int, tank_id: int) -> "TankSnapshot | None":
+        """Get a snapshot of a tank's cumulative stats for post-battle comparison.
+
+        Returns:
+            TankSnapshot with current cumulative stats, or None if not found.
+        """
+        tanks = await self.get_player_tanks(account_id, tank_id)
+        if not tanks:
+            return None
+        t = tanks[0]
+        all_stats = t.get("all", {})
+        return TankSnapshot(
+            tank_id=t.get("tank_id", tank_id),
+            battles=all_stats.get("battles", 0),
+            marks_on_gun=t.get("marks_on_gun", 0),
+            damage_dealt=all_stats.get("damage_dealt", 0),
+            damage_assisted=all_stats.get("damage_assisted", 0),
+        )
+
+    async def detect_active_tank(self, account_id: int) -> dict | None:
+        """Find the most recently played tank for a player.
+
+        Returns:
+            The tank stats dict for the most recently played tank, or None.
+        """
+        tanks = await self.get_player_tanks(account_id)
+        if not tanks:
+            return None
+        # Sort by last_battle_time descending; fall back to 0 if missing
+        tanks.sort(key=lambda t: t.get("last_battle_time", 0), reverse=True)
+        return tanks[0]
+
+
+@dataclass
+class TankSnapshot:
+    """Cumulative stats snapshot for a specific tank, used for post-battle correction."""
+
+    tank_id: int
+    battles: int
+    marks_on_gun: int
+    damage_dealt: int
+    damage_assisted: int
+
+    def battle_delta(self, after: "TankSnapshot") -> "BattleDelta | None":
+        """Compute per-battle damage delta between this snapshot and a later one.
+
+        Returns:
+            BattleDelta if exactly one new battle was played, None otherwise.
+        """
+        battles_diff = after.battles - self.battles
+        if battles_diff != 1:
+            return None
+        return BattleDelta(
+            damage_dealt=after.damage_dealt - self.damage_dealt,
+            damage_assisted=after.damage_assisted - self.damage_assisted,
+            marks_on_gun_before=self.marks_on_gun,
+            marks_on_gun_after=after.marks_on_gun,
+        )
+
+
+@dataclass
+class BattleDelta:
+    """Per-battle damage values computed from API cumulative stat deltas.
+
+    The damage_assisted here reflects WG's server-side calculation, which uses
+    max(tracking, spotting) rather than the sum shown on the in-game HUD.
+    This makes it more accurate than our OCR-derived estimate.
+    """
+
+    damage_dealt: int
+    damage_assisted: int
+    marks_on_gun_before: int
+    marks_on_gun_after: int
+
+    @property
+    def combined(self) -> int:
+        return self.damage_dealt + self.damage_assisted
+
+    @property
+    def marks_changed(self) -> bool:
+        return self.marks_on_gun_after != self.marks_on_gun_before
