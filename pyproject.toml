@@ -22,7 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 ocr-fallback = [
     "paddleocr>=2.7",
-    "paddlepaddle>=2.5",
+    "paddlepaddle>=2.6.2",
 ]
 ui = [
     "PyQt6>=6.5",
