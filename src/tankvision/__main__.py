@@ -706,6 +706,10 @@ def main() -> None:
     if tray_mode:
         args.remove("--tray")
 
+    cli_mode = "--cli" in args
+    if cli_mode:
+        args.remove("--cli")
+
     config_path = args[0] if args else "config.toml"
 
     if calibrate_mode is not None:
@@ -714,15 +718,23 @@ def main() -> None:
         run_roi_picker(config_path, mode=calibrate_mode)
         return
 
-    if tray_mode:
+    # Default to tray mode unless --cli is specified
+    if not cli_mode:
         try:
             from tankvision.tray.app import TrayApplication
         except ImportError:
-            print(
-                "PyQt6 is required for the tray UI.\n"
-                "Install it with: pip install 'wot-console-overlay[ui]'"
-            )
-            sys.exit(1)
+            if tray_mode:
+                # User explicitly asked for tray but PyQt6 is missing
+                print(
+                    "PyQt6 is required for the tray UI.\n"
+                    "Install it with: pip install 'wot-console-overlay[ui]'"
+                )
+                sys.exit(1)
+            # Implicit tray — fall back to CLI silently
+            logger.info("PyQt6 not installed, falling back to CLI mode")
+            asyncio.run(run(config_path))
+            return
+
         app = TrayApplication(config_path)
         sys.exit(app.run())
 
