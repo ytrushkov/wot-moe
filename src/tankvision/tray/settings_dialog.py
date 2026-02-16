@@ -9,10 +9,8 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
-    QLabel,
     QLineEdit,
     QPushButton,
-    QSpinBox,
     QWidget,
 )
 
@@ -54,21 +52,6 @@ class SettingsDialog(QDialog):
         self._platform.setCurrentText(self._orig_platform)
         layout.addRow("Platform:", self._platform)
 
-        # Target damage
-        self._orig_target = config["moe"]["target_damage"]
-        self._target_damage = QSpinBox()
-        self._target_damage.setRange(0, 20000)
-        self._target_damage.setSingleStep(100)
-        self._target_damage.setValue(self._orig_target)
-        layout.addRow("Target Damage:", self._target_damage)
-
-        hint = QLabel(
-            '<a href="https://wotconsole.info/marks/">Look up values at wotconsole.info</a>'
-        )
-        hint.setOpenExternalLinks(True)
-        hint.setStyleSheet("font-size: 11px; color: #888;")
-        layout.addRow("", hint)
-
         # Sample rate
         self._orig_sample_rate = config["ocr"]["sample_rate"]
         self._sample_rate = QDoubleSpinBox()
@@ -103,10 +86,6 @@ class SettingsDialog(QDialog):
             self._bridge.push_config_change("player", "gamertag", self._gamertag.text())
         if self._platform.currentText() != self._orig_platform:
             self._bridge.push_config_change("player", "platform", self._platform.currentText())
-        if self._target_damage.value() != self._orig_target:
-            self._bridge.push_config_change(
-                "moe", "target_damage", self._target_damage.value()
-            )
         if self._sample_rate.value() != self._orig_sample_rate:
             self._bridge.push_config_change("ocr", "sample_rate", self._sample_rate.value())
         if self._confidence.value() != self._orig_confidence:

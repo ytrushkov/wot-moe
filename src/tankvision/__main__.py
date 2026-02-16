@@ -101,34 +101,36 @@ async def _resolve_startup_data(config: dict, api: WargamingApi) -> dict:
     return result
 
 
-async def _resolve_target_damage(
+def _resolve_target_damage(
     config: dict,
-    tank_id: int,
     tank_name: str,
     marks_on_gun: int,
     threshold_provider: ThresholdProvider,
 ) -> int:
     """Determine the target damage threshold for MoE calculation.
 
-    Priority: ThresholdProvider (cached/remote) > config fallback.
+    Priority: ThresholdProvider name lookup > config fallback.
     """
-    if tank_id:
-        thresholds = await threshold_provider.get_thresholds(tank_id, tank_name)
+    if tank_name:
+        thresholds = threshold_provider.get_by_name(tank_name)
         if thresholds:
             next_mark = min(marks_on_gun + 1, 3)
             target = int(thresholds.target_for_mark(next_mark))
-            logger.info("Threshold for %d-mark: %d (from provider)", next_mark, target)
+            logger.info(
+                "Threshold for %s %d-mark: %d (from cache, matched '%s')",
+                tank_name, next_mark, target, thresholds.tank_name,
+            )
             return target
 
     target = config["moe"]["target_damage"]
     if target > 0:
-        logger.info("Using config target_damage=%d", target)
+        logger.info("Using config target_damage=%d (no cached threshold for '%s')", target, tank_name)
     else:
         logger.warning(
-            "Target damage is 0 for %s — MoE tracking will not work. "
-            "Set a target via Settings or [moe] target_damage in config.toml. "
-            "Look up values at https://wotconsole.info/marks/",
-            tank_name or f"tank {tank_id}",
+            "Target damage is 0 for '%s' — MoE tracking will not work. "
+            "Ensure wotconsole.info is reachable so thresholds can be fetched, "
+            "or set [moe] target_damage in config.toml as a fallback.",
+            tank_name or "(unknown tank)",
         )
     return target
 
@@ -271,8 +273,8 @@ async def _handle_tank_switch(
         except Exception:
             logger.warning("Failed to take API snapshot for tank %d", new_tank_id)
 
-    target_damage = await _resolve_target_damage(
-        config, new_tank_id, new_tank_name, marks_on_gun, threshold_provider,
+    target_damage = _resolve_target_damage(
+        config, new_tank_name, marks_on_gun, threshold_provider,
     )
 
     # Restore persisted EMA or start fresh
@@ -383,10 +385,6 @@ def _apply_config_changes(
             sample_rate = float(value)  # type: ignore[arg-type]
         elif key == "ocr.confidence_threshold":
             ocr.matcher.confidence_threshold = float(value)  # type: ignore[arg-type]
-        elif key == "moe.target_damage":
-            target = int(value)  # type: ignore[arg-type]
-            calculator.set_target(target)
-            logger.info("Target damage updated to %d", target)
         elif key in ("player.gamertag", "player.platform"):
             logger.warning(
                 "Changing %s requires a restart to take effect.", key,
@@ -461,10 +459,12 @@ async def run(
     tank_name: str = startup["tank_name"]
     api_snapshot: TankSnapshot | None = startup["api_snapshot"]
 
+    # --- Refresh MoE thresholds (lazy, 24hr TTL) ---
+    await threshold_provider.refresh_if_stale()
+
     # --- Determine MoE parameters ---
-    target_damage = await _resolve_target_damage(
+    target_damage = _resolve_target_damage(
         config,
-        tank_id,
         tank_name,
         startup["marks_on_gun"],
         threshold_provider,

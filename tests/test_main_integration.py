@@ -89,31 +89,37 @@ class TestResolveStartupData:
 
 
 class TestResolveTargetDamage:
-    @pytest.mark.asyncio
-    async def test_uses_threshold_provider(self, tmp_path: Path):
+    def test_uses_threshold_provider(self, tmp_path: Path):
         provider = ThresholdProvider(cache_dir=tmp_path)
-        provider.set_manual(42, "T-54", 4000)
+        # Populate the cache manually via the internal index
+        from tankvision.data.threshold_provider import MoeThresholds
+
+        thresholds = MoeThresholds(tank_name="T-54", mark_65=2736, mark_85=3578, mark_95=4000)
+        provider._name_index["t-54"] = thresholds
+        provider._all_names = list(provider._name_index.keys())
 
         config = {"moe": {"target_damage": 0}}
-        target = await _resolve_target_damage(config, 42, "T-54", 2, provider)
+        target = _resolve_target_damage(config, "T-54", 2, provider)
         # 2 marks → targeting 3rd mark → mark_95 = 4000
         assert target == 4000
 
-    @pytest.mark.asyncio
-    async def test_falls_back_to_config(self, tmp_path: Path):
+    def test_falls_back_to_config(self, tmp_path: Path):
         provider = ThresholdProvider(cache_dir=tmp_path)
         config = {"moe": {"target_damage": 3500}}
-        target = await _resolve_target_damage(config, 0, "", 0, provider)
+        target = _resolve_target_damage(config, "", 0, provider)
         assert target == 3500
 
-    @pytest.mark.asyncio
-    async def test_no_tank_id_uses_config(self, tmp_path: Path):
+    def test_no_tank_name_uses_config(self, tmp_path: Path):
         provider = ThresholdProvider(cache_dir=tmp_path)
-        provider.set_manual(42, "T-54", 4000)
+        from tankvision.data.threshold_provider import MoeThresholds
+
+        thresholds = MoeThresholds(tank_name="T-54", mark_65=2736, mark_85=3578, mark_95=4000)
+        provider._name_index["t-54"] = thresholds
+        provider._all_names = list(provider._name_index.keys())
 
         config = {"moe": {"target_damage": 2000}}
-        # tank_id=0 means no tank detected
-        target = await _resolve_target_damage(config, 0, "", 0, provider)
+        # empty tank_name means no tank detected
+        target = _resolve_target_damage(config, "", 0, provider)
         assert target == 2000
 
 
