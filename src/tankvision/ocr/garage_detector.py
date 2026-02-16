@@ -54,15 +54,15 @@ class GarageDetector:
                 use_angle_cls=False,
                 lang="en",
                 show_log=False,
-                use_gpu=False,
             )
             logger.info("PaddleOCR initialised for garage detection")
             return True
-        except ImportError:
+        except (ImportError, ValueError) as e:
             self._ocr_unavailable = True
             logger.warning(
-                "PaddleOCR is not installed — garage tank-name detection is disabled. "
-                "Install with: pip install 'wot-console-overlay[ocr-fallback]'"
+                "PaddleOCR initialization failed (%s) — garage tank-name detection is disabled. "
+                "Install with: pip install 'wot-console-overlay[ocr-fallback]'",
+                type(e).__name__,
             )
             return False
 
