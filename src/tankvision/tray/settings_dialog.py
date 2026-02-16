@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -28,6 +29,11 @@ class SettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("WoT Console Assistant — Settings")
+        # WindowStaysOnTopHint ensures the dialog appears above other windows
+        # when opened from a macOS tray icon (which doesn't activate the app).
+        self.setWindowFlags(
+            self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint
+        )
         self._bridge = bridge
 
         config = load_config(config_path)

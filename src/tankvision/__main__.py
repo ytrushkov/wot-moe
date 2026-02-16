@@ -352,6 +352,7 @@ def _apply_config_changes(
     changes: dict[str, object],
     config: dict,
     ocr: OcrPipeline,
+    capture: ScreenCapture,
     current_sample_rate: float,
 ) -> float:
     """Apply runtime config changes from the tray settings dialog.
@@ -359,6 +360,7 @@ def _apply_config_changes(
     Returns the (potentially updated) sample rate.
     """
     sample_rate = current_sample_rate
+    roi_changed = False
 
     for key, value in changes.items():
         section, name = key.split(".", 1)
@@ -373,6 +375,22 @@ def _apply_config_changes(
             logger.warning(
                 "Changing %s requires a restart to take effect.", key,
             )
+        elif key in ("ocr.roi_x", "ocr.roi_y", "ocr.roi_width", "ocr.roi_height"):
+            roi_changed = True
+
+    if roi_changed:
+        ocr_cfg = config.get("ocr", {})
+        new_roi = (
+            int(ocr_cfg.get("roi_x", 0)),
+            int(ocr_cfg.get("roi_y", 0)),
+            int(ocr_cfg.get("roi_width", 300)),
+            int(ocr_cfg.get("roi_height", 100)),
+        )
+        capture.set_roi(new_roi)
+        logger.info(
+            "OCR capture region updated: %dx%d at (%d, %d)",
+            new_roi[2], new_roi[3], new_roi[0], new_roi[1],
+        )
 
     return sample_rate
 
@@ -573,7 +591,7 @@ async def run(
                 changes = bridge.pop_config_changes()
                 if changes:
                     sample_rate = _apply_config_changes(
-                        changes, config, ocr, sample_rate,
+                        changes, config, ocr, capture, sample_rate,
                     )
 
             loop_start = time.monotonic()

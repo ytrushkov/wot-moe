@@ -240,7 +240,14 @@ class TankVisionTrayIcon(QSystemTrayIcon):
     def _run_calibration(self, mode: str) -> None:
         from tankvision.calibration.roi_picker import run_roi_picker
 
-        run_roi_picker(self._config_path, mode=mode)
+        roi = run_roi_picker(self._config_path, mode=mode)
+        if roi is not None:
+            x, y, w, h = roi
+            section = "ocr" if mode == "ocr" else "garage"
+            self._bridge.push_config_change(section, "roi_x", x)
+            self._bridge.push_config_change(section, "roi_y", y)
+            self._bridge.push_config_change(section, "roi_width", w)
+            self._bridge.push_config_change(section, "roi_height", h)
 
     def _open_overlay(self) -> None:
         from tankvision.config import load_config
