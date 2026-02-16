@@ -21,7 +21,7 @@ class LogViewerWindow(QWidget):
 
     def __init__(self, bridge: AppStateBridge, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("TankVision — Log")
+        self.setWindowTitle("WoT Console Assistant — Log")
         self.setWindowFlags(Qt.WindowType.Tool)
         self.setMinimumSize(640, 400)
 
@@ -39,7 +39,12 @@ class LogViewerWindow(QWidget):
         btn_layout.addWidget(clear_btn)
         layout.addLayout(btn_layout)
 
-        bridge.log_message.connect(self._append_line)
+        # Use QueuedConnection explicitly: the signal is emitted from the
+        # asyncio worker thread, so the slot must be marshalled to the main
+        # thread's event loop.
+        bridge.log_message.connect(
+            self._append_line, Qt.ConnectionType.QueuedConnection
+        )
 
     def _append_line(self, line: str) -> None:
         self._text.appendPlainText(line)

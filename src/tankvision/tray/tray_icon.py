@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import platform
 import time
 import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPixmap
-from PyQt6.QtWidgets import QMenu, QSystemTrayIcon, QWidget
+from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
 from tankvision.tray.state_bridge import AppSnapshot, AppStateBridge
 
@@ -44,6 +45,27 @@ def _load_icon(name: str, fallback_color: QColor) -> QIcon:
     return _make_circle_icon(fallback_color)
 
 
+def _activate_app() -> None:
+    """Bring the application to the foreground on macOS.
+
+    Without this, windows opened from a tray icon menu appear behind
+    other applications because the app is not the "active" application.
+    """
+    if platform.system() == "Darwin":
+        app = QApplication.instance()
+        if app is not None:
+            # processEvents ensures pending events are flushed before activation
+            app.processEvents()
+    # On macOS use Cocoa API to steal focus
+    try:
+        from AppKit import NSApp, NSApplicationActivationPolicyRegular
+
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        NSApp.activateIgnoringOtherApps_(True)
+    except ImportError:
+        pass
+
+
 class TankVisionTrayIcon(QSystemTrayIcon):
     """System tray icon with full context menu for TankVision."""
 
@@ -69,7 +91,7 @@ class TankVisionTrayIcon(QSystemTrayIcon):
         self._icon_active = _load_icon("icon_active", QColor(0, 200, 0))
         self._icon_paused = _load_icon("icon_paused", QColor(220, 180, 0))
         self.setIcon(self._icon_idle)
-        self.setToolTip("TankVision — Starting...")
+        self.setToolTip("WoT Console Assistant — Starting...")
 
         # Build context menu
         self._menu = QMenu()
@@ -103,8 +125,8 @@ class TankVisionTrayIcon(QSystemTrayIcon):
 
         menu.addSeparator()
 
-        # --- OCR preview ---
-        ocr_action = menu.addAction("OCR Preview...")
+        # --- Capture preview ---
+        ocr_action = menu.addAction("Capture Preview...")
         ocr_action.triggered.connect(self._show_ocr_preview)
 
         menu.addSeparator()
@@ -151,7 +173,7 @@ class TankVisionTrayIcon(QSystemTrayIcon):
         # Update tooltip
         tank = snapshot.tank_name or "No tank"
         self.setToolTip(
-            f"TankVision — {tank}\n"
+            f"WoT Console Assistant — {tank}\n"
             f"MoE: {snapshot.moe_percent:.2f}% | {snapshot.status}"
         )
 
@@ -189,6 +211,7 @@ class TankVisionTrayIcon(QSystemTrayIcon):
     def _show_ocr_preview(self) -> None:
         from tankvision.tray.ocr_preview_window import OcrValidationWindow
 
+        _activate_app()
         if self._ocr_window is None:
             self._ocr_window = OcrValidationWindow(self._bridge)
         self._ocr_window.show()
@@ -198,12 +221,16 @@ class TankVisionTrayIcon(QSystemTrayIcon):
     def _show_settings(self) -> None:
         from tankvision.tray.settings_dialog import SettingsDialog
 
+        _activate_app()
         dialog = SettingsDialog(self._config_path, self._bridge)
+        dialog.raise_()
+        dialog.activateWindow()
         dialog.exec()
 
     def _show_log_viewer(self) -> None:
         from tankvision.tray.log_viewer_window import LogViewerWindow
 
+        _activate_app()
         if self._log_window is None:
             self._log_window = LogViewerWindow(self._bridge)
         self._log_window.show()

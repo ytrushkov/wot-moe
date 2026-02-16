@@ -9,7 +9,6 @@ import threading
 
 from PyQt6.QtWidgets import QApplication
 
-from tankvision.tray.state_bridge import AppStateBridge
 from tankvision.tray.tray_icon import TankVisionTrayIcon
 
 logger = logging.getLogger("tankvision.tray")
@@ -20,7 +19,7 @@ class TrayApplication:
 
     def __init__(self, config_path: str = "config.toml") -> None:
         self._config_path = config_path
-        self._bridge = AppStateBridge()
+        self._bridge = None  # created after QApplication exists
         self._worker_thread: threading.Thread | None = None
 
     def run(self) -> int:
@@ -29,7 +28,15 @@ class TrayApplication:
         Returns the application exit code.
         """
         app = QApplication(sys.argv)
+        app.setApplicationName("WoT Console Assistant")
+        app.setApplicationDisplayName("WoT Console Assistant")
         app.setQuitOnLastWindowClosed(False)
+
+        # Create the bridge AFTER QApplication so that the QObject has
+        # proper thread affinity — required for cross-thread signal delivery.
+        from tankvision.tray.state_bridge import AppStateBridge
+
+        self._bridge = AppStateBridge()
 
         tray = TankVisionTrayIcon(self._bridge, self._config_path)
         tray.show()

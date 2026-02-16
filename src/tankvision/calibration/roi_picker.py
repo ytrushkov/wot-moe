@@ -17,7 +17,7 @@ from pathlib import Path
 
 _MODES = {
     "garage": {
-        "title": "TankVision — Select Tank Name Region",
+        "title": "WoT Console Assistant — Select Tank Name Region",
         "instruction": (
             "Drag a rectangle over the tank name in the garage.\n"
             "Press ENTER to confirm, ESC to cancel."
@@ -25,7 +25,7 @@ _MODES = {
         "section": "garage",
     },
     "ocr": {
-        "title": "TankVision — Select Damage Number Region",
+        "title": "WoT Console Assistant — Select Damage Number Region",
         "instruction": (
             "Drag a rectangle over the damage numbers shown during battle.\n"
             "Include both direct and assisted damage areas.\n"
@@ -244,7 +244,7 @@ def run_roi_picker(
             self.selected_tag: str | None = None  # "screen" or "window"
             self.selected_data: dict | None = None
 
-            self.setWindowTitle("TankVision — Choose What to Capture")
+            self.setWindowTitle("WoT Console Assistant — Choose What to Capture")
             self.setMinimumSize(560, 400)
 
             layout = QVBoxLayout(self)
@@ -558,7 +558,22 @@ def run_roi_picker(
     picker = RoiPickerWindow(bg_pixmap, screen_offset)
     picker.setGeometry(geo)
     picker.showFullScreen()
-    app.exec()
+
+    # Use a local event loop so this works both standalone and
+    # when called from within an already-running QApplication (tray mode).
+    from PyQt6.QtCore import QEventLoop
+
+    loop = QEventLoop()
+    # QMainWindow doesn't have a "finished" signal, so we poll via destroyed
+    # after close. Override closeEvent to quit our local loop instead.
+    original_close = picker.closeEvent
+
+    def _on_close(event):
+        original_close(event)
+        loop.quit()
+
+    picker.closeEvent = _on_close
+    loop.exec()
 
     roi = picker.selected_roi
     if roi is None:

@@ -22,7 +22,7 @@ class OcrValidationWindow(QWidget):
         super().__init__(parent)
         self._bridge = bridge
 
-        self.setWindowTitle("TankVision — OCR Preview")
+        self.setWindowTitle("WoT Console Assistant — Capture Preview")
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setMinimumSize(400, 300)
 
