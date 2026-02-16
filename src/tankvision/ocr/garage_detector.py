@@ -1,7 +1,8 @@
-"""Garage screen OCR: reads the selected tank name via PaddleOCR."""
+"""Garage screen OCR: reads the selected tank name via Tesseract or PaddleOCR."""
 
 import difflib
 import logging
+import platform
 from pathlib import Path
 
 import numpy as np
@@ -14,8 +15,9 @@ logger = logging.getLogger(__name__)
 class GarageDetector:
     """Continuously reads the tank name from the garage screen.
 
-    Uses PaddleOCR to extract text from a user-defined ROI, then fuzzy-matches
-    against the WG encyclopedia to resolve a ``tank_id``.
+    Uses Tesseract (preferred on macOS) or PaddleOCR to extract text from a
+    user-defined ROI, then fuzzy-matches against the WG encyclopedia to resolve
+    a ``tank_id``.
 
     Args:
         roi: Screen region (x, y, width, height) covering the tank name.
@@ -34,12 +36,14 @@ class GarageDetector:
         self._vehicle_names = list(vehicle_lookup.keys())
         self._current_tank_id: int = 0
         self._current_tank_name: str = ""
-        self._ocr = None  # Lazy-init PaddleOCR (heavy import)
-        self._ocr_unavailable = False  # True after a failed import attempt
+        self._ocr_backend: str | None = None  # "tesseract" or "paddle"
+        self._ocr = None  # Lazy-init OCR engine
+        self._ocr_unavailable = False  # True after all backends failed
 
     def _ensure_ocr(self) -> bool:
-        """Lazy-initialise PaddleOCR on first use.
+        """Lazy-initialise OCR backend on first use.
 
+        Tries Tesseract first (better for macOS ARM), falls back to PaddleOCR.
         Returns True if OCR is ready, False if unavailable.
         Logs a warning once on the first failure, then stays silent.
         """
@@ -47,6 +51,47 @@ class GarageDetector:
             return True
         if self._ocr_unavailable:
             return False
+
+        # Try Tesseract first (preferred on macOS, works on ARM)
+        if self._try_tesseract():
+            return True
+
+        # Fall back to PaddleOCR
+        if self._try_paddleocr():
+            return True
+
+        # All backends failed
+        self._ocr_unavailable = True
+        is_arm = platform.machine() == "arm64"
+        hint = (
+            "On macOS ARM: brew install tesseract && pip install pytesseract\n"
+            "             Or use Rosetta: arch -x86_64 python3 -m venv venv-x86"
+            if is_arm
+            else "pip install 'wot-console-overlay[ocr-fallback]'"
+        )
+        logger.warning(
+            "No OCR backend available — garage tank-name detection is disabled.\n%s",
+            hint,
+        )
+        return False
+
+    def _try_tesseract(self) -> bool:
+        """Try to initialize pytesseract. Returns True on success."""
+        try:
+            import pytesseract
+            from PIL import Image
+
+            # Quick smoke test: check if tesseract binary is available
+            pytesseract.get_tesseract_version()
+            self._ocr = pytesseract
+            self._ocr_backend = "tesseract"
+            logger.info("Tesseract OCR initialised for garage detection")
+            return True
+        except (ImportError, FileNotFoundError, pytesseract.TesseractNotFoundError):
+            return False
+
+    def _try_paddleocr(self) -> bool:
+        """Try to initialize PaddleOCR. Returns True on success."""
         try:
             from paddleocr import PaddleOCR
 
@@ -55,21 +100,36 @@ class GarageDetector:
                 lang="en",
                 show_log=False,
             )
+            self._ocr_backend = "paddle"
             logger.info("PaddleOCR initialised for garage detection")
             return True
-        except (ImportError, ValueError) as e:
-            self._ocr_unavailable = True
-            logger.warning(
-                "PaddleOCR initialization failed (%s) — garage tank-name detection is disabled. "
-                "Install with: pip install 'wot-console-overlay[ocr-fallback]'",
-                type(e).__name__,
-            )
+        except (ImportError, ValueError, Exception):
             return False
 
     def _ocr_frame(self, frame: np.ndarray) -> str:
-        """Run PaddleOCR on a BGR frame and return the concatenated text."""
+        """Run OCR on a BGR frame and return the concatenated text."""
         if not self._ensure_ocr():
             return ""
+
+        if self._ocr_backend == "tesseract":
+            return self._ocr_frame_tesseract(frame)
+        elif self._ocr_backend == "paddle":
+            return self._ocr_frame_paddle(frame)
+        return ""
+
+    def _ocr_frame_tesseract(self, frame: np.ndarray) -> str:
+        """Run Tesseract OCR on a BGR numpy array."""
+        import pytesseract
+        from PIL import Image
+
+        # Convert BGR → RGB
+        rgb = frame[:, :, ::-1]
+        pil_img = Image.fromarray(rgb)
+        text = pytesseract.image_to_string(pil_img, config="--psm 7").strip()
+        return text
+
+    def _ocr_frame_paddle(self, frame: np.ndarray) -> str:
+        """Run PaddleOCR on a BGR numpy array."""
         results = self._ocr.ocr(frame, cls=False)
         if not results or not results[0]:
             return ""
