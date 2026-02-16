@@ -123,6 +123,13 @@ async def _resolve_target_damage(
     target = config["moe"]["target_damage"]
     if target > 0:
         logger.info("Using config target_damage=%d", target)
+    else:
+        logger.warning(
+            "Target damage is 0 for %s — MoE tracking will not work. "
+            "Set a target via Settings or [moe] target_damage in config.toml. "
+            "Look up values at https://wotconsole.info/marks/",
+            tank_name or f"tank {tank_id}",
+        )
     return target
 
 
@@ -355,6 +362,7 @@ def _apply_config_changes(
     config: dict,
     ocr: OcrPipeline,
     capture: ScreenCapture,
+    calculator: MoeCalculator,
     current_sample_rate: float,
     garage_detector: GarageDetector | None = None,
 ) -> float:
@@ -375,6 +383,10 @@ def _apply_config_changes(
             sample_rate = float(value)  # type: ignore[arg-type]
         elif key == "ocr.confidence_threshold":
             ocr.matcher.confidence_threshold = float(value)  # type: ignore[arg-type]
+        elif key == "moe.target_damage":
+            target = int(value)  # type: ignore[arg-type]
+            calculator.set_target(target)
+            logger.info("Target damage updated to %d", target)
         elif key in ("player.gamertag", "player.platform"):
             logger.warning(
                 "Changing %s requires a restart to take effect.", key,
@@ -613,8 +625,8 @@ async def run(
                 changes = bridge.pop_config_changes()
                 if changes:
                     sample_rate = _apply_config_changes(
-                        changes, config, ocr, capture, sample_rate,
-                        garage_detector=garage_detector,
+                        changes, config, ocr, capture, calculator,
+                        sample_rate, garage_detector=garage_detector,
                     )
 
             loop_start = time.monotonic()
