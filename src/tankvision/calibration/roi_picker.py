@@ -477,7 +477,7 @@ def run_roi_picker(
 
     # ---- Launch ----
 
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
 
     # Capture full screenshots for each screen (used for thumbnails + cropping)
     screens = QApplication.screens()

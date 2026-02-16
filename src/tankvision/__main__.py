@@ -1,9 +1,12 @@
 """Entry point for WoT Console Overlay application."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import signal
 import sys
+import time
 
 from tankvision.calculation.moe_calculator import MoeCalculator
 from tankvision.capture.screen_capture import ScreenCapture
@@ -290,7 +293,105 @@ async def _handle_tank_switch(
     return new_tank_id, new_tank_name, new_session_id, api_snapshot
 
 
-async def run(config_path: str = "config.toml") -> None:
+# TYPE_CHECKING-style import to avoid hard dependency on PyQt6
+# for the headless path. The actual import happens at runtime in tray mode.
+try:
+    from tankvision.tray.state_bridge import AppStateBridge
+except ImportError:  # PyQt6 not installed
+    AppStateBridge = None  # type: ignore[misc,assignment]
+
+
+class _BridgeLogHandler(logging.Handler):
+    """Forwards log records to the tray UI via the bridge."""
+
+    def __init__(self, bridge: AppStateBridge) -> None:  # type: ignore[type-arg]
+        super().__init__()
+        self._bridge = bridge
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            self._bridge.publish_log(msg)
+        except Exception:
+            self.handleError(record)
+
+
+def _install_bridge_log_handler(bridge: AppStateBridge) -> None:  # type: ignore[type-arg]
+    handler = _BridgeLogHandler(bridge)
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
+    logging.getLogger("tankvision").addHandler(handler)
+
+
+def _publish_tray_state(
+    bridge: AppStateBridge,  # type: ignore[type-arg]
+    status: str,
+    tank_name: str,
+    calculator: MoeCalculator,
+    *,
+    frame,
+    ocr_text: str,
+    ocr_confidence: float,
+    sample_rate_actual: float,
+) -> None:
+    """Build an AppSnapshot and publish it to the tray UI."""
+    from tankvision.tray.state_bridge import AppSnapshot
+
+    bridge.publish_state(AppSnapshot(
+        status=status,
+        tank_name=tank_name,
+        moe_percent=calculator.current_moe,
+        battles_this_session=calculator.battles_this_session,
+        last_frame=frame,
+        last_ocr_text=ocr_text,
+        last_confidence=ocr_confidence,
+        sample_rate_actual=sample_rate_actual,
+    ))
+
+
+def _apply_config_changes(
+    changes: dict[str, object],
+    config: dict,
+    ocr: OcrPipeline,
+    current_sample_rate: float,
+) -> float:
+    """Apply runtime config changes from the tray settings dialog.
+
+    Returns the (potentially updated) sample rate.
+    """
+    sample_rate = current_sample_rate
+
+    for key, value in changes.items():
+        section, name = key.split(".", 1)
+        logger.info("Config change: [%s] %s = %r", section, name, value)
+        config.setdefault(section, {})[name] = value
+
+        if key == "ocr.sample_rate":
+            sample_rate = float(value)  # type: ignore[arg-type]
+        elif key == "ocr.confidence_threshold":
+            ocr.matcher.confidence_threshold = float(value)  # type: ignore[arg-type]
+        elif key in ("player.gamertag", "player.platform"):
+            logger.warning(
+                "Changing %s requires a restart to take effect.", key,
+            )
+
+    return sample_rate
+
+
+async def run(
+    config_path: str = "config.toml",
+    bridge: AppStateBridge | None = None,
+) -> None:
+    """Run the main capture/OCR/broadcast loop.
+
+    Args:
+        config_path: Path to the TOML config file.
+        bridge: Optional cross-thread bridge for the system tray UI.
+                When None, the app runs in headless CLI mode (original behavior).
+    """
+    # Attach a log handler that forwards to the tray UI
+    if bridge is not None:
+        _install_bridge_log_handler(bridge)
+
     config = load_config(config_path)
 
     # --- Data layer ---
@@ -392,12 +493,22 @@ async def run(config_path: str = "config.toml") -> None:
         logger.info("Shutting down...")
         stop_event.set()
 
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, handle_signal)
-        except NotImplementedError:
-            pass  # Windows
+    # When running under the tray UI, Qt owns the main thread and signal
+    # handlers.  We rely on bridge.should_stop instead.
+    if bridge is None:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, handle_signal)
+            except NotImplementedError:
+                pass  # Windows
+
+    def _should_stop() -> bool:
+        if stop_event.is_set():
+            return True
+        if bridge is not None and bridge.should_stop:
+            return True
+        return False
 
     # --- Start servers ---
     await server.start()
@@ -415,7 +526,7 @@ async def run(config_path: str = "config.toml") -> None:
         nonlocal tank_id, tank_name, session_id, api_snapshot
         assert garage_detector is not None
         interval = config["garage"]["poll_interval"]
-        while not stop_event.is_set():
+        while not _should_stop():
             await asyncio.sleep(interval)
             try:
                 switch = garage_detector.detect_switch()
@@ -444,12 +555,42 @@ async def run(config_path: str = "config.toml") -> None:
 
     # --- Main loop ---
     correction_task: asyncio.Task | None = None
+    sample_rate = config["ocr"]["sample_rate"]
 
     try:
-        while not stop_event.is_set():
+        while not _should_stop():
+            # --- Pause support (tray only) ---
+            if bridge is not None and bridge.is_paused:
+                _publish_tray_state(
+                    bridge, "paused", tank_name, calculator, frame=None,
+                    ocr_text="", ocr_confidence=0.0, sample_rate_actual=0.0,
+                )
+                await asyncio.sleep(0.5)
+                continue
+
+            # --- Apply runtime config changes (tray only) ---
+            if bridge is not None:
+                changes = bridge.pop_config_changes()
+                if changes:
+                    sample_rate = _apply_config_changes(
+                        changes, config, ocr, sample_rate,
+                    )
+
+            loop_start = time.monotonic()
+
             frame = capture.grab_frame()
             if frame is not None:
-                damage_values = ocr.process_frame(frame)
+                # Use detailed OCR when the preview window is open
+                ocr_text = ""
+                ocr_confidence = 0.0
+                if bridge is not None and bridge.ocr_preview_active:
+                    detailed = ocr.process_frame_detailed(frame)
+                    damage_values = detailed.reading
+                    ocr_text = str(detailed.reading.combined) if detailed.reading else ""
+                    ocr_confidence = detailed.overall_confidence
+                else:
+                    damage_values = ocr.process_frame(frame)
+
                 if damage_values is not None:
                     state = calculator.update(damage_values)
 
@@ -494,7 +635,25 @@ async def run(config_path: str = "config.toml") -> None:
 
                     await server.broadcast(state)
 
-            await asyncio.sleep(1.0 / config["ocr"]["sample_rate"])
+                # Publish state to tray UI
+                if bridge is not None:
+                    elapsed = time.monotonic() - loop_start
+                    actual_rate = 1.0 / elapsed if elapsed > 0 else 0.0
+                    status = "idle"
+                    if damage_values is not None:
+                        status = getattr(state, "status", "idle")
+                    _publish_tray_state(
+                        bridge,
+                        status,
+                        tank_name,
+                        calculator,
+                        frame=frame if bridge.ocr_preview_active else None,
+                        ocr_text=ocr_text,
+                        ocr_confidence=ocr_confidence,
+                        sample_rate_actual=actual_rate,
+                    )
+
+            await asyncio.sleep(1.0 / sample_rate)
     finally:
         # Cancel background tasks
         for task in (garage_task, correction_task):
@@ -530,8 +689,9 @@ def main() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    # Parse --calibrate [mode] flag
+    # Parse CLI flags
     args = sys.argv[1:]
+
     calibrate_mode: str | None = None
     if "--calibrate" in args:
         idx = args.index("--calibrate")
@@ -541,6 +701,11 @@ def main() -> None:
             calibrate_mode = args.pop(idx)
         else:
             calibrate_mode = "ocr"
+
+    tray_mode = "--tray" in args
+    if tray_mode:
+        args.remove("--tray")
+
     config_path = args[0] if args else "config.toml"
 
     if calibrate_mode is not None:
@@ -548,6 +713,18 @@ def main() -> None:
 
         run_roi_picker(config_path, mode=calibrate_mode)
         return
+
+    if tray_mode:
+        try:
+            from tankvision.tray.app import TrayApplication
+        except ImportError:
+            print(
+                "PyQt6 is required for the tray UI.\n"
+                "Install it with: pip install 'wot-console-overlay[ui]'"
+            )
+            sys.exit(1)
+        app = TrayApplication(config_path)
+        sys.exit(app.run())
 
     asyncio.run(run(config_path))
 
