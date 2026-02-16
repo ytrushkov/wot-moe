@@ -39,6 +39,7 @@ class GarageDetector:
         self._ocr_backend: str | None = None  # "tesseract" or "paddle"
         self._ocr = None  # Lazy-init OCR engine
         self._ocr_unavailable = False  # True after all backends failed
+        self.last_frame: np.ndarray | None = None  # Last captured frame for preview
 
     def _ensure_ocr(self) -> bool:
         """Lazy-initialise OCR backend on first use.
@@ -173,6 +174,7 @@ class GarageDetector:
         frame = self._capture.grab_frame()
         if frame is None:
             return None
+        self.last_frame = frame
 
         ocr_text = self._ocr_frame(frame)
         if not ocr_text:

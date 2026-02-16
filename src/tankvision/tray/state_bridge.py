@@ -23,6 +23,7 @@ class AppSnapshot:
     combined_damage: int = 0
     battles_this_session: int = 0
     last_frame: np.ndarray | None = field(default=None, repr=False)
+    garage_frame: np.ndarray | None = field(default=None, repr=False)
     last_ocr_text: str = ""
     last_confidence: float = 0.0
     sample_rate_actual: float = 0.0

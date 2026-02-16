@@ -329,6 +329,7 @@ def _publish_tray_state(
     calculator: MoeCalculator,
     *,
     frame,
+    garage_frame=None,
     ocr_text: str,
     ocr_confidence: float,
     sample_rate_actual: float,
@@ -342,6 +343,7 @@ def _publish_tray_state(
         moe_percent=calculator.current_moe,
         battles_this_session=calculator.battles_this_session,
         last_frame=frame,
+        garage_frame=garage_frame,
         last_ocr_text=ocr_text,
         last_confidence=ocr_confidence,
         sample_rate_actual=sample_rate_actual,
@@ -354,13 +356,15 @@ def _apply_config_changes(
     ocr: OcrPipeline,
     capture: ScreenCapture,
     current_sample_rate: float,
+    garage_detector: GarageDetector | None = None,
 ) -> float:
     """Apply runtime config changes from the tray settings dialog.
 
     Returns the (potentially updated) sample rate.
     """
     sample_rate = current_sample_rate
-    roi_changed = False
+    ocr_roi_changed = False
+    garage_roi_changed = False
 
     for key, value in changes.items():
         section, name = key.split(".", 1)
@@ -376,9 +380,13 @@ def _apply_config_changes(
                 "Changing %s requires a restart to take effect.", key,
             )
         elif key in ("ocr.roi_x", "ocr.roi_y", "ocr.roi_width", "ocr.roi_height"):
-            roi_changed = True
+            ocr_roi_changed = True
+        elif key in (
+            "garage.roi_x", "garage.roi_y", "garage.roi_width", "garage.roi_height",
+        ):
+            garage_roi_changed = True
 
-    if roi_changed:
+    if ocr_roi_changed:
         ocr_cfg = config.get("ocr", {})
         new_roi = (
             int(ocr_cfg.get("roi_x", 0)),
@@ -388,7 +396,21 @@ def _apply_config_changes(
         )
         capture.set_roi(new_roi)
         logger.info(
-            "OCR capture region updated: %dx%d at (%d, %d)",
+            "Damage capture region updated: %dx%d at (%d, %d)",
+            new_roi[2], new_roi[3], new_roi[0], new_roi[1],
+        )
+
+    if garage_roi_changed and garage_detector is not None:
+        g_cfg = config.get("garage", {})
+        new_roi = (
+            int(g_cfg.get("roi_x", 0)),
+            int(g_cfg.get("roi_y", 0)),
+            int(g_cfg.get("roi_width", 300)),
+            int(g_cfg.get("roi_height", 100)),
+        )
+        garage_detector.set_roi(new_roi)
+        logger.info(
+            "Garage capture region updated: %dx%d at (%d, %d)",
             new_roi[2], new_roi[3], new_roi[0], new_roi[1],
         )
 
@@ -592,6 +614,7 @@ async def run(
                 if changes:
                     sample_rate = _apply_config_changes(
                         changes, config, ocr, capture, sample_rate,
+                        garage_detector=garage_detector,
                     )
 
             loop_start = time.monotonic()
@@ -660,12 +683,16 @@ async def run(
                     status = "idle"
                     if damage_values is not None:
                         status = getattr(state, "status", "idle")
+                    garage_fr = None
+                    if bridge.ocr_preview_active and garage_detector is not None:
+                        garage_fr = garage_detector.last_frame
                     _publish_tray_state(
                         bridge,
                         status,
                         tank_name,
                         calculator,
                         frame=frame if bridge.ocr_preview_active else None,
+                        garage_frame=garage_fr,
                         ocr_text=ocr_text,
                         ocr_confidence=ocr_confidence,
                         sample_rate_actual=actual_rate,

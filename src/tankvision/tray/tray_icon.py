@@ -133,7 +133,7 @@ class TankVisionTrayIcon(QSystemTrayIcon):
 
         # --- Calibrate submenu ---
         cal_menu = menu.addMenu("Calibrate")
-        cal_ocr = cal_menu.addAction("OCR Region...")
+        cal_ocr = cal_menu.addAction("Damage Region...")
         cal_ocr.triggered.connect(lambda: self._run_calibration("ocr"))
         cal_garage = cal_menu.addAction("Garage Region...")
         cal_garage.triggered.connect(lambda: self._run_calibration("garage"))

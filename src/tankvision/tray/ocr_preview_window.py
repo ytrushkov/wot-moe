@@ -1,4 +1,4 @@
-"""Floating window showing live OCR capture and recognition results."""
+"""Floating window showing live capture and recognition results."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from tankvision.tray.state_bridge import AppSnapshot, AppStateBridge
 
 
 class OcrValidationWindow(QWidget):
-    """Shows the current captured frame, recognized text, and confidence."""
+    """Shows the current captured frames, recognized text, and confidence."""
 
     def __init__(self, bridge: AppStateBridge, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -24,19 +24,29 @@ class OcrValidationWindow(QWidget):
 
         self.setWindowTitle("WoT Console Assistant — Capture Preview")
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
-        self.setMinimumSize(400, 300)
+        self.setMinimumSize(400, 400)
 
         layout = QVBoxLayout(self)
 
-        # Frame display
-        frame_group = QGroupBox("Captured Frame")
-        frame_layout = QVBoxLayout(frame_group)
+        # Damage capture area
+        damage_group = QGroupBox("Damage Region")
+        damage_layout = QVBoxLayout(damage_group)
         self._frame_label = QLabel("No frame yet")
         self._frame_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._frame_label.setMinimumHeight(150)
+        self._frame_label.setMinimumHeight(100)
         self._frame_label.setScaledContents(True)
-        frame_layout.addWidget(self._frame_label)
-        layout.addWidget(frame_group)
+        damage_layout.addWidget(self._frame_label)
+        layout.addWidget(damage_group)
+
+        # Garage capture area
+        garage_group = QGroupBox("Garage Region (Tank Name)")
+        garage_layout = QVBoxLayout(garage_group)
+        self._garage_label = QLabel("No frame yet")
+        self._garage_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._garage_label.setMinimumHeight(100)
+        self._garage_label.setScaledContents(True)
+        garage_layout.addWidget(self._garage_label)
+        layout.addWidget(garage_group)
 
         # Recognition results
         result_group = QGroupBox("Recognition")
@@ -66,14 +76,17 @@ class OcrValidationWindow(QWidget):
     def update_snapshot(self, snapshot: AppSnapshot) -> None:
         """Update display with a new state snapshot from the worker."""
         if snapshot.last_frame is not None:
-            self._display_frame(snapshot.last_frame)
+            self._display_frame(snapshot.last_frame, self._frame_label)
+        if snapshot.garage_frame is not None:
+            self._display_frame(snapshot.garage_frame, self._garage_label)
 
         self._text_label.setText(f"Recognized: {snapshot.last_ocr_text or 'nothing'}")
         self._confidence_label.setText(f"Confidence: {snapshot.last_confidence:.1%}")
         self._rate_label.setText(f"Actual sample rate: {snapshot.sample_rate_actual:.1f} Hz")
 
-    def _display_frame(self, frame: np.ndarray) -> None:
-        """Convert a BGR numpy array to QPixmap and display."""
+    @staticmethod
+    def _display_frame(frame: np.ndarray, label: QLabel) -> None:
+        """Convert a BGR numpy array to QPixmap and display in the given label."""
         h, w = frame.shape[:2]
         if frame.ndim == 3 and frame.shape[2] >= 3:
             # BGR to RGB
@@ -83,4 +96,4 @@ class OcrValidationWindow(QWidget):
             # Grayscale
             gray = frame.copy()
             qimg = QImage(gray.data, w, h, w, QImage.Format.Format_Grayscale8)
-        self._frame_label.setPixmap(QPixmap.fromImage(qimg))
+        label.setPixmap(QPixmap.fromImage(qimg))
