@@ -428,7 +428,8 @@ class ThresholdProvider:
     def get_by_name(self, tank_name: str) -> MoeThresholds | None:
         """Look up thresholds by tank name (case-insensitive, fuzzy match).
 
-        Tries exact match first, then fuzzy match with cutoff=0.6.
+        Tries exact match first, then fuzzy match with cutoff=0.8.
+        The high cutoff avoids false positives like "DBV-152" → "SU-152".
         """
         if not self._name_index:
             return None
@@ -439,11 +440,16 @@ class ThresholdProvider:
         if query in self._name_index:
             return self._name_index[query]
 
-        # Fuzzy match
-        matches = difflib.get_close_matches(query, self._all_names, n=1, cutoff=0.6)
+        # Fuzzy match — cutoff=0.8 to avoid false positives from OCR noise
+        matches = difflib.get_close_matches(query, self._all_names, n=1, cutoff=0.8)
         if matches:
+            logger.info(
+                "Fuzzy-matched '%s' → '%s' (not exact)",
+                tank_name, self._name_index[matches[0]].tank_name,
+            )
             return self._name_index[matches[0]]
 
+        logger.warning("No threshold match for '%s'", tank_name)
         return None
 
     # --- Private helpers ---

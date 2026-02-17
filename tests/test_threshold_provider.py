@@ -141,10 +141,18 @@ class TestThresholdProvider:
         provider._name_index["object 140"] = MoeThresholds("Object 140", 2800, 3600, 4500)
         provider._all_names = list(provider._name_index.keys())
 
-        # Slight misspelling from OCR
-        result = provider.get_by_name("0bject 14O")
+        # Minor OCR error (one char off — within 0.8 cutoff)
+        result = provider.get_by_name("Object l40")
         assert result is not None
         assert result.tank_name == "Object 140"
+
+    def test_fuzzy_match_rejects_distant_names(self, provider: ThresholdProvider):
+        provider._name_index["su-152"] = MoeThresholds("SU-152", 1800, 2100, 2284)
+        provider._all_names = list(provider._name_index.keys())
+
+        # "DBV-152" should NOT match "SU-152" — too different
+        result = provider.get_by_name("DBV-152")
+        assert result is None
 
     def test_disk_persistence(self, tmp_path: Path):
         # Write cache via internal methods
